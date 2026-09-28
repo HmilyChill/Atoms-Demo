@@ -36,3 +36,8 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# ── 题目原文与附件：明确要求"请勿以任何形式对外传播或共享" ──
+# 本仓库会以 public 形式交付，因此题目原文与图片不入库。
+# 如需在本机保留，请放在此目录（本地可见，不会被提交）。
+Atoms-Demo/
