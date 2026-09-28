@@ -1,0 +1,433 @@
+/**
+ * 工作台界面测试（M2/M3/M6/M7 的 UI 集成）。
+ *
+ * 为什么需要：工作台是 ~700 行客户端逻辑（SSE 时间线、短步骤驱动循环、产物归约、版本回滚），
+ * 此前**没有任何自动化覆盖**。而之前那个"表格渲染崩溃"的 bug 已经证明：
+ * 未被测试的 UI 代码里真的会藏 bug——而 HTTP 冒烟测不出来。
+ *
+ * 做法：jsdom 提供 DOM，stub 替掉 fetch 与 EventSource，
+ * 真实渲染 React 组件并**模拟用户点击**，断言请求与界面都正确。
+ *
+ * 注意：用 createElement 而非 JSX —— Node 的类型剥离只删类型、不做 JSX 转换。
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { JSDOM } from 'jsdom'
+import { MessageChannel as NodeMessageChannel } from 'node:worker_threads'
+
+import { analyzeRequirement, buildTemplateSpec } from '@/lib/llm/templates'
+import type { AppSpec } from '@/lib/spec/types'
+
+const FIXED_TIME = '2026-01-01T00:00:00.000Z'
+const SPEC: AppSpec = buildTemplateSpec(
+  analyzeRequirement('做一个个人待办清单：能新增任务、标记完成、按状态筛选、删除。'),
+  FIXED_TIME,
+)
+
+// ─────────── 环境搭建（必须在导入 react-dom 之前完成）───────────
+
+const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+  url: 'http://localhost/projects/proj_wb',
+  pretendToBeVisual: true,
+})
+const g = globalThis as unknown as Record<string, unknown>
+
+/** Node 24 里部分全局是只读 getter（如 navigator），必须用 defineProperty 注入 */
+function setGlobal(key: string, value: unknown) {
+  Object.defineProperty(g, key, { value, writable: true, configurable: true })
+}
+
+setGlobal('window', dom.window)
+setGlobal('document', dom.window.document)
+setGlobal('navigator', dom.window.navigator)
+setGlobal('HTMLElement', dom.window.HTMLElement)
+setGlobal('Event', dom.window.Event)
+setGlobal('CustomEvent', dom.window.CustomEvent)
+setGlobal('MouseEvent', dom.window.MouseEvent)
+setGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+// React 调度器依赖 MessageChannel；jsdom 可能没有，用 Node 的补上
+if (!(dom.window as unknown as Record<string, unknown>).MessageChannel) {
+  ;(dom.window as unknown as Record<string, unknown>).MessageChannel = NodeMessageChannel
+}
+setGlobal('MessageChannel', (dom.window as unknown as Record<string, unknown>).MessageChannel)
+
+interface FetchCall {
+  url: string
+  method: string
+  body: unknown
+}
+
+const calls: FetchCall[] = []
+/** 由各测试设置：step 接口依次返回的 done 值 */
+let stepResponses: boolean[] = [true]
+/** 由各测试设置：项目是否已有 Spec（决定按钮是「开始生成」还是「提交迭代」） */
+let specAvailable = true
+
+function jsonResponse(data: unknown): Response {
+  return { ok: true, status: 200, json: async () => ({ data }) } as unknown as Response
+}
+
+const ARTIFACTS = [
+  {
+    id: 'a1',
+    type: 'plan',
+    summary: '执行计划',
+    payload: {
+      goal: '交付一个待办清单',
+      deliverable: '可交互应用',
+      steps: [{ order: 1, title: '解析需求', detail: 'd' }],
+      pageOutline: [],
+    },
+    createdAt: FIXED_TIME,
+  },
+  {
+    id: 'a2',
+    type: 'contract',
+    summary: '需求契约',
+    payload: {
+      mustDo: [{ id: 'md-1', text: '提供新增任务的表单' }],
+      mustNot: [{ id: 'mn-1', text: '不新增需求之外的数据集合' }],
+      acceptance: ['能新增一条任务'],
+    },
+    createdAt: FIXED_TIME,
+  },
+  {
+    id: 'a3',
+    type: 'verification',
+    summary: '校验通过',
+    payload: {
+      ok: true,
+      summary: '结构校验通过；渲染冒烟通过；契约 3 项全部通过',
+      contract: { total: 3, passed: [{ id: 'md-1', text: '提供新增任务的表单' }], failed: [] },
+      render: { errors: [], pagesChecked: 1, componentsChecked: 5 },
+      unverified: [],
+    },
+    createdAt: FIXED_TIME,
+  },
+]
+
+const PUSHED_EVENTS = [
+  { eventId: 1, type: 'run.started', payload: {}, at: FIXED_TIME },
+  { eventId: 2, type: 'agent.started', payload: { agent: 'Mike', label: '团队领导 · 计划' }, at: FIXED_TIME },
+  {
+    eventId: 3,
+    type: 'agent.finished',
+    payload: { agent: 'Mike', durationMs: 42, tokenUsage: 120, provider: 'mock' },
+    at: FIXED_TIME,
+  },
+  {
+    eventId: 4,
+    type: 'contract.ready',
+    payload: { mustDo: ['提供新增任务的表单'], mustNot: [], acceptance: ['能新增一条任务'] },
+    at: FIXED_TIME,
+  },
+]
+
+async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> {
+  const url = String(input)
+  const method = (init?.method ?? 'GET').toUpperCase()
+  let body: unknown = null
+  if (typeof init?.body === 'string') {
+    try {
+      body = JSON.parse(init.body)
+    } catch {
+      body = init.body
+    }
+  }
+  calls.push({ url, method, body })
+
+  if (url.includes('/spec')) {
+    return jsonResponse({
+      version: specAvailable ? 1 : null,
+      spec: specAvailable ? SPEC : null,
+      changeSummary: specAvailable ? '生成' : '',
+      versions: specAvailable
+        ? [{ version: 1, parentVersion: null, changeSummary: '生成', createdAt: FIXED_TIME, isCurrent: true }]
+        : [],
+      verification: specAvailable ? ARTIFACTS[2].payload : null,
+    })
+  }
+  if (url.includes('/preview-token')) {
+    return jsonResponse({ token: 'preview-token-abc', expiresInSec: 1800, mode: 'rw' })
+  }
+  if (/\/api\/runs$/.test(url) && method === 'POST') {
+    return jsonResponse({ runId: 'run_wb_1', sessionId: 's1', mode: 'create', status: 'pending', stage: 'created' })
+  }
+  if (url.includes('/api/runs/run_wb_1') && !url.includes('/step')) {
+    return jsonResponse({
+      run: {
+        id: 'run_wb_1',
+        status: 'running',
+        stage: 'planned',
+        mode: 'create',
+        errorMessage: null,
+        tokenUsage: 120,
+        callCount: 1,
+      },
+      nextStep: 'contract',
+      artifacts: ARTIFACTS,
+      events: [],
+    })
+  }
+  if (url.includes('/step')) {
+    const done = stepResponses.length > 0 ? (stepResponses.shift() as boolean) : true
+    return jsonResponse({
+      run: {
+        id: 'run_wb_1',
+        status: done ? 'succeeded' : 'running',
+        stage: done ? 'finished' : 'paged',
+        mode: 'create',
+        errorCode: null,
+        errorMessage: null,
+        tokenUsage: 400,
+        callCount: 3,
+      },
+      done,
+      payload: null,
+    })
+  }
+  return jsonResponse({})
+}
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  url: string
+  listeners = new Map<string, Array<(e: { data: string }) => void>>()
+  closed = false
+
+  constructor(url: string) {
+    this.url = url
+    FakeEventSource.instances.push(this)
+  }
+  addEventListener(type: string, cb: (e: { data: string }) => void) {
+    const list = this.listeners.get(type) ?? []
+    list.push(cb)
+    this.listeners.set(type, list)
+  }
+  close() {
+    this.closed = true
+  }
+  push(event: unknown) {
+    const type = (event as { type: string }).type
+    for (const cb of this.listeners.get(type) ?? []) cb({ data: JSON.stringify(event) })
+  }
+}
+
+setGlobal('fetch', fakeFetch)
+setGlobal('EventSource', FakeEventSource)
+;(dom.window as unknown as Record<string, unknown>).fetch = fakeFetch
+;(dom.window as unknown as Record<string, unknown>).EventSource = FakeEventSource
+
+// 环境就绪后再导入 React 与组件
+const React = await import('react')
+const { createRoot } = await import('react-dom/client')
+const { Workbench } = await import('@/components/workbench')
+
+// ─────────── 工具 ───────────
+
+async function flush(times = 8) {
+  for (let i = 0; i < times; i += 1) {
+    await new Promise((r) => setTimeout(r, 0))
+  }
+}
+
+function container(): HTMLElement {
+  return dom.window.document.getElementById('root') as HTMLElement
+}
+
+async function mount(options: { spec?: boolean; steps?: boolean[] } = {}) {
+  resetStubs(options)
+  calls.length = 0
+  FakeEventSource.instances = []
+  const el = container()
+  el.innerHTML = ''
+  const root = createRoot(el)
+  await React.act(async () => {
+    root.render(React.createElement(Workbench, { projectId: 'proj_wb', projectName: '工作台测试项目' }))
+  })
+  await React.act(async () => {
+    await flush()
+  })
+  return root
+}
+
+/** 重置所有可变桩状态，避免测试互相污染 */
+function resetStubs(options: { spec?: boolean; steps?: boolean[] } = {}) {
+  specAvailable = options.spec ?? true
+  stepResponses = options.steps ?? [true]
+}
+
+function findButton(text: string): HTMLButtonElement | null {
+  const buttons = Array.from(container().querySelectorAll('button')) as HTMLButtonElement[]
+  return buttons.find((b) => b.textContent?.includes(text)) ?? null
+}
+
+/**
+ * 生成按钮的文案会随状态变化：
+ *   无 Spec → 「开始生成」；已有 Spec → 「提交迭代」；生成中 → 「生成中…」
+ */
+function findGenerateButton(): HTMLButtonElement | null {
+  for (const label of ['开始生成', '提交迭代']) {
+    const hit = findButton(label)
+    if (hit) return hit
+  }
+  return null
+}
+
+function callsTo(fragment: string) {
+  return calls.filter((c) => c.url.includes(fragment))
+}
+
+async function typeRequirement(text: string) {
+  const textarea = container().querySelector('textarea') as HTMLTextAreaElement
+  await React.act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    setter?.call(textarea, text)
+    textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  })
+}
+
+// ─────────── 测试 ───────────
+
+test('工作台：挂载时加载 Spec 与预览令牌，并渲染三栏骨架', async () => {
+  await mount()
+  assert.ok(callsTo('/spec').length > 0, '应请求项目 Spec')
+  assert.ok(callsTo('/preview-token').length > 0, '应请求预览令牌')
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('工作台测试项目'), '应显示项目名')
+  assert.ok(text.includes('智能体时间线'), '应渲染左栏时间线')
+  assert.ok(text.includes('实时预览'), '应渲染右栏预览区')
+  assert.ok(findGenerateButton(), '应渲染生成按钮')
+})
+
+test('工作台：生成按钮文案反映当前状态（首次生成 vs 迭代已有应用）', async () => {
+  // ① 项目还没有 Spec → 「开始生成」
+  await mount({ spec: false })
+  assert.ok(findButton('开始生成'), '无 Spec 时应显示「开始生成」')
+  assert.equal(findButton('提交迭代'), null, '无 Spec 时不应出现「提交迭代」')
+
+  // ② 项目已有 Spec → 「提交迭代」（因为生成会产出新版本，而不是从零开始）
+  await mount({ spec: true })
+  assert.ok(findButton('提交迭代'), '已有 Spec 时应显示「提交迭代」')
+  assert.equal(findButton('开始生成'), null, '已有 Spec 时不应再显示「开始生成」')
+})
+
+test('工作台：预览 iframe 使用严格沙箱，并用令牌鉴权（不依赖 Cookie）', async () => {
+  await mount()
+  const iframe = container().querySelector('iframe')
+  assert.ok(iframe, '应渲染预览 iframe')
+
+  const sandbox = iframe?.getAttribute('sandbox') ?? ''
+  assert.ok(sandbox.includes('allow-scripts'), '应允许脚本（否则生成的应用无法运行）')
+  assert.ok(
+    !sandbox.includes('allow-same-origin'),
+    '⚠️ 绝不能授予同源权限——否则沙箱形同虚设（docs/00 §11.1 A4）',
+  )
+  const src = iframe?.getAttribute('src') ?? ''
+  assert.ok(src.includes('/preview/proj_wb'), 'iframe 应指向预览页')
+  assert.ok(src.includes('pt=preview-token-abc'), 'iframe 应携带预览令牌')
+})
+
+test('工作台：提交需求会创建 Run，并驱动短步骤循环直到完成', async () => {
+  await mount({ steps: [false, false, true] })
+  await typeRequirement('做一个个人待办清单：能新增任务、标记完成、按状态筛选、删除。')
+
+  const submit = findGenerateButton()
+  assert.ok(submit, '应存在开始生成按钮')
+  await React.act(async () => {
+    submit.click()
+    await flush(24)
+  })
+
+  const createRun = callsTo('/api/runs').find((c) => c.method === 'POST')
+  assert.ok(createRun, '应调用创建 Run 接口')
+  assert.equal(
+    (createRun?.body as { userInput?: string })?.userInput,
+    '做一个个人待办清单：能新增任务、标记完成、按状态筛选、删除。',
+    '应把用户输入作为需求提交',
+  )
+
+  const steps = callsTo('/step')
+  assert.equal(steps.length, 3, `应循环推进 3 步（实际 ${steps.length} 次）`)
+  assert.ok(callsTo('/spec').length >= 2, '生成结束后应重新拉取 Spec（产物落库 → 界面同步）')
+})
+
+test('工作台：SSE 事件驱动时间线，且显示智能体与耗时', async () => {
+  await mount()
+  await typeRequirement('待办清单')
+
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(20)
+  })
+
+  const es = FakeEventSource.instances[0]
+  assert.ok(es, '应建立 SSE 订阅')
+  assert.ok(es.url.includes('/api/runs/run_wb_1/events'), `订阅地址应指向事件流，实际：${es.url}`)
+
+  await React.act(async () => {
+    for (const evt of PUSHED_EVENTS) es.push(evt)
+    await flush(8)
+  })
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('Mike'), '时间线应显示智能体名称')
+  assert.ok(text.includes('团队领导 · 计划'), '时间线应显示角色标签')
+  assert.ok(text.includes('42ms'), '时间线应显示耗时')
+
+  const contractTab = findButton('需求契约')
+  assert.ok(contractTab, '应存在需求契约页签')
+  await React.act(async () => {
+    contractTab?.click()
+    await flush(4)
+  })
+  assert.ok(container().textContent?.includes('提供新增任务的表单'), '契约页签应显示必做项')
+})
+
+test('工作台：产物归约正确——计划与校验报告都能在对应页签看到', async () => {
+  await mount()
+  await typeRequirement('做一个待办清单')
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(20)
+  })
+
+  await React.act(async () => {
+    findButton('执行计划')?.click()
+    await flush(4)
+  })
+  assert.ok(container().textContent?.includes('交付一个待办清单'), '执行计划页签应显示目标')
+
+  await React.act(async () => {
+    findButton('校验报告')?.click()
+    await flush(4)
+  })
+  assert.ok(container().textContent?.includes('校验全部通过'), '校验报告页签应显示结论')
+})
+
+test('工作台：空需求不会被提交（客户端就拦住，不浪费一次生成额度）', async () => {
+  await mount()
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(12)
+  })
+
+  assert.equal(callsTo('/api/runs').length, 0, '空需求不应创建 Run')
+  assert.ok(container().textContent?.includes('请先描述你想要的应用'), '应就地给出提示')
+})
+
+test('工作台：版本页签显示版本列表，当前版本不提供回滚按钮', async () => {
+  await mount()
+  const versionTab = findButton('版本与迭代')
+  assert.ok(versionTab, '应存在版本与迭代页签')
+  await React.act(async () => {
+    versionTab?.click()
+    await flush(4)
+  })
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('v1'), '应显示版本号')
+  assert.ok(text.includes('当前'), '应标注当前版本')
+  assert.equal(findButton('回滚到此版本'), null, '当前版本不应提供回滚按钮')
+})

@@ -1,11 +1,17 @@
 /**
- * Node ESM 解析钩子：
+ * Node ESM 解析/加载钩子（仅用于测试）：
  *  1. 把 `@/xxx` 映射到 `src/xxx`
  *  2. 为无扩展名的相对/别名导入补全 .ts / .tsx / index.ts
- * 目的：让 `node --test` 能直接跑 TypeScript 源码，无需额外构建步骤或第三方依赖。
+ *  3. 用 **TypeScript 编译器 API** 转换 .tsx（JSX）
+ *
+ * 为什么用 TypeScript 而不是 esbuild/sucrase：
+ *  本环境禁止 child_process 的管道 stdio（spawn EPERM），而 esbuild 的 JS API
+ *  必须通过管道与它的服务子进程通信 → 直接 EPERM。TypeScript 编译器 API 是纯 JS、
+ *  完全在进程内运行，且 typescript 本来就是这个项目的 devDependency，无需引入新依赖。
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const SRC = new URL('../src/', import.meta.url)
 
@@ -31,4 +37,23 @@ export async function resolve(specifier, context, next) {
     if (hit) return next(hit, context)
   }
   return next(specifier, context)
+}
+
+export async function load(url, context, next) {
+  if (url.endsWith('.tsx')) {
+    const fileName = fileURLToPath(url)
+    const source = readFileSync(fileName, 'utf8')
+    const output = ts.transpileModule(source, {
+      fileName,
+      compilerOptions: {
+        jsx: ts.JsxEmit.ReactJSX,
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+        esModuleInterop: true,
+        isolatedModules: true,
+      },
+    })
+    return { format: 'module', shortCircuit: true, source: output.outputText }
+  }
+  return next(url, context)
 }

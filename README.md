@@ -63,7 +63,7 @@ pnpm dev          # 开发服务器
 pnpm build        # 生产构建
 pnpm start        # 启动生产服务
 pnpm typecheck    # TypeScript 类型检查（tsc --noEmit）
-pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时交互）
+pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时 / 导出包 / 工作台 UI）
 pnpm smoke        # 端到端冒烟测试（需先启动服务，见下）
 pnpm smoke:provider   # 真实模型连通性与结构化输出验证（需 DEEPSEEK_API_KEY）
 pnpm push:github      # 用 GitHub API 推送仓库（保留完整提交历史与 tag；先跑 --dry-run）
