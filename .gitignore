@@ -1,0 +1,38 @@
+# ── 依赖与构建产物 ──
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── 密钥：绝不提交 ──
+.env
+.env.*
+!.env.example
+
+# ── 本地缓存与下载（全部留在 E 盘，不入库）──
+.pnpm-store/
+.npm-cache/
+.playwright-browsers/
+
+# ── 本地数据 ──
+.data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.db-wal
+
+# ── 导出产物与临时文件 ──
+exports/
+tmp/
+*.log
+
+# ── OS / 编辑器 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
