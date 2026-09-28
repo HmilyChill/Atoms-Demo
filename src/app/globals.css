@@ -1,0 +1,33 @@
+@import 'tailwindcss';
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 让长文本与日志可读 */
+.atoms-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.atoms-scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.atoms-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.atoms-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
