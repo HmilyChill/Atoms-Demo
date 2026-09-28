@@ -9,20 +9,27 @@
  *  必须通过管道与它的服务子进程通信 → 直接 EPERM。TypeScript 编译器 API 是纯 JS、
  *  完全在进程内运行，且 typescript 本来就是这个项目的 devDependency，无需引入新依赖。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 const SRC = new URL('../src/', import.meta.url)
 
+function isFile(url) {
+  try {
+    const p = fileURLToPath(url)
+    return existsSync(p) && statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
 function pick(baseUrl) {
-  const candidates = [baseUrl, `${baseUrl}.ts`, `${baseUrl}.tsx`, `${baseUrl}/index.ts`, `${baseUrl}/index.tsx`]
+  // 注意：必须先判断"是文件"，否则同名**目录**会被当成模块，
+  // 触发 ERR_UNSUPPORTED_DIR_IMPORT（例如 @/lib/llm 既有目录也有 index.ts）
+  const candidates = [`${baseUrl}.ts`, `${baseUrl}.tsx`, `${baseUrl}/index.ts`, `${baseUrl}/index.tsx`]
   for (const c of candidates) {
-    try {
-      if (existsSync(fileURLToPath(c))) return c
-    } catch {
-      /* 忽略非法 URL */
-    }
+    if (isFile(c)) return c
   }
   return null
 }

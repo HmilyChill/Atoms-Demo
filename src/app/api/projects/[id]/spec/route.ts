@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server'
 import { requireUser } from '@/lib/auth/guard'
 import { getStore, rowToJson } from '@/lib/db/store'
 import { AppError } from '@/lib/errors'
+import { readCompatibleSpec } from '@/lib/spec/schema-compat'
 import { ok, route } from '@/lib/api/http'
 
 /** 读取项目当前（或指定版本）的 App Spec；同时返回版本列表用于版本面板 */
@@ -30,7 +31,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
     return ok({
       version: target ? target.version : null,
-      spec: target ? rowToJson<Record<string, unknown>>(target.spec) : null,
+      // 经版本兼容校验：不兼容时明确报错，而不是让前端拿到看不懂的结构
+      spec: target ? readCompatibleSpec(target.spec, `v${target.version} 的 App Spec`) : null,
       changeSummary: target ? target.change_summary : '',
       versions: versions.map((v) => ({
         version: v.version,

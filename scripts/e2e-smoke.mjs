@@ -347,6 +347,98 @@ const main = async () => {
   const empty = await api('/api/runs', { method: 'POST', body: JSON.stringify({ projectId, userInput: '   ' }) })
   check('空输入被拒绝', empty.status === 400, `status=${empty.status}`)
 
+  section('8.1 取消生成（IT-5）')
+  const cancellable = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, userInput: '做一个会议室预约系统：提交预约并确认或取消。' }),
+  })
+  const cancelId = cancellable.body?.data?.runId
+  check('可创建待取消的生成任务', cancellable.status === 201 && !!cancelId, `status=${cancellable.status}`)
+  if (cancelId) {
+    await api(`/api/runs/${cancelId}/step`, { method: 'POST' })
+    const cancelled = await api(`/api/runs/${cancelId}/cancel`, { method: 'POST' })
+    check(
+      '可取消生成，状态置为 cancelled',
+      cancelled.status === 200 && cancelled.body?.data?.run?.status === 'cancelled',
+      JSON.stringify(cancelled.body?.data),
+    )
+    const afterCancel = await api(`/api/runs/${cancelId}`)
+    check('取消状态已持久化（重新读取仍为 cancelled）', afterCancel.body?.data?.run?.status === 'cancelled')
+    check(
+      '取消留下 run.cancelled 事件',
+      (afterCancel.body?.data?.events ?? []).some((e) => e.type === 'run.cancelled'),
+    )
+    check(
+      '取消后已产出产物仍保留',
+      (afterCancel.body?.data?.artifacts ?? []).length > 0,
+      '取消不应清空产物',
+    )
+    const stepAfterCancel = await api(`/api/runs/${cancelId}/step`, { method: 'POST' })
+    check(
+      '取消后继续推进是幂等的',
+      stepAfterCancel.body?.data?.run?.status === 'cancelled' && stepAfterCancel.body?.data?.done === true,
+    )
+  }
+
+  section('8.2 生成中状态恢复（IT-6）')
+  const recoverable = await api('/api/runs', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, userInput: '做一个库存管理工具：登记物料入库并查看分类汇总。' }),
+  })
+  const recoverId = recoverable.body?.data?.runId
+  check('可创建用于恢复验证的生成任务', recoverable.status === 201 && !!recoverId, `status=${recoverable.status}`)
+  if (recoverId) {
+    await api(`/api/runs/${recoverId}/step`, { method: 'POST' })
+    const snap1 = await api(`/api/runs/${recoverId}`)
+    const snap2 = await api(`/api/runs/${recoverId}`)
+    check(
+      '两次快照阶段一致（状态已落库，刷新后可恢复）',
+      snap1.body?.data?.run?.stage === snap2.body?.data?.run?.stage,
+      `${snap1.body?.data?.run?.stage} vs ${snap2.body?.data?.run?.stage}`,
+    )
+    check('调用次数与用量已落库', (snap2.body?.data?.run?.callCount ?? 0) > 0)
+    check('事件已持久化，可用于重放对齐', (snap2.body?.data?.events ?? []).length > 0)
+    const continued = await api(`/api/runs/${recoverId}/step`, { method: 'POST' })
+    check(
+      '可以从落库状态继续推进（而不是从头开始）',
+      continued.status === 200 && continued.body?.data?.run?.stage !== snap2.body?.data?.run?.stage,
+    )
+    await api(`/api/runs/${recoverId}/cancel`, { method: 'POST' })
+  }
+
+  section('9.2 安全响应头（M11 F-M11-7）')
+  const headRes = await fetch(`${BASE}/`)
+  check('包含 X-Content-Type-Options: nosniff', headRes.headers.get('x-content-type-options') === 'nosniff')
+  check(
+    '包含 X-Frame-Options: SAMEORIGIN（允许自有预览，禁止被第三方嵌套）',
+    (headRes.headers.get('x-frame-options') ?? '').toUpperCase().includes('SAMEORIGIN'),
+    headRes.headers.get('x-frame-options') ?? '',
+  )
+  check('包含 Referrer-Policy（避免预览令牌经 Referer 外泄）', (headRes.headers.get('referrer-policy') ?? '').length > 0)
+  check(
+    'CSP 的 frame-ancestors 与沙箱策略一致',
+    (headRes.headers.get('content-security-policy') ?? '').includes("frame-ancestors 'self'"),
+    headRes.headers.get('content-security-policy') ?? '',
+  )
+  check('包含 Permissions-Policy', (headRes.headers.get('permissions-policy') ?? '').length > 0)
+
+  section('9.3 限流（M11 TST-M11-1）')
+  let sawRateLimit = false
+  let rateLimitMessage = ''
+  for (let i = 0; i < 40; i += 1) {
+    const r = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({ projectId, userInput: `限流探测 ${i}` }),
+    })
+    if (r.status === 429) {
+      sawRateLimit = true
+      rateLimitMessage = r.body?.error?.message ?? ''
+      break
+    }
+  }
+  check('高频调用生成接口会触发 429 限流', sawRateLimit, '40 次内未触发限流')
+  check('限流提示可读并说明可等待', /过于频繁|限流/.test(rateLimitMessage), rateLimitMessage)
+
   section('10. 清理')
   const del = await api(`/api/projects/${projectId}`, { method: 'DELETE' })
   check('可删除项目', del.status === 200, `status=${del.status} body=${JSON.stringify(del.body).slice(0, 200)}`)

@@ -5,6 +5,7 @@ import { requireUser } from '@/lib/auth/guard'
 import { getStore, rowToJson } from '@/lib/db/store'
 import { AppError } from '@/lib/errors'
 import { toErrorResponse } from '@/lib/errors'
+import { readCompatibleSpec } from '@/lib/spec/schema-compat'
 import type { AppSpec } from '@/lib/spec/types'
 import { buildExportHtml, buildExportProjectFiles, slugify, type ExportParams } from '@/lib/export/build-export-html'
 import { createZip } from '@/lib/export/zip'
@@ -29,7 +30,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     }
 
     const format = new URL(req.url).searchParams.get('format') === 'zip' ? 'zip' : 'html'
-    const spec = rowToJson<AppSpec>(latest.spec)
+    const spec = readCompatibleSpec(latest.spec, `v${latest.version} 的 App Spec`)
     const runtimeSource = readFileSync(path.join(process.cwd(), 'public', 'app-runtime.js'), 'utf8')
 
     const params: ExportParams = {

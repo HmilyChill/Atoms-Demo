@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { toErrorResponse } from '@/lib/errors'
+import { logger } from '@/lib/obs/logger'
 
 const TRACE_HEADER = 'x-atoms-trace'
 
@@ -20,6 +21,15 @@ export async function route(handler: () => Promise<NextResponse>): Promise<NextR
     return await handler()
   } catch (err) {
     const { status, body } = toErrorResponse(err)
+    // M12：错误也要留下结构化可追溯记录（含 traceId，便于按用户反馈定位）
+    logger[status >= 500 ? 'error' : 'warn']({
+      event: 'api.error',
+      status,
+      code: body.error.code,
+      message: body.error.message,
+      traceId: body.error.traceId,
+      hint: body.error.hint,
+    })
     return NextResponse.json(body, { status })
   }
 }

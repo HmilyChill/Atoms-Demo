@@ -15,6 +15,7 @@ import { env } from '@/lib/env'
 import { getStore, type ArtifactType, type RunRow, type RunStatus, type SessionStatus } from '@/lib/db/store'
 import { emit, type RunEvent } from '@/lib/events/bus'
 import { recordCall } from '@/lib/quota/guard'
+import { logger } from '@/lib/obs/logger'
 import { getLlmProvider } from '@/lib/llm'
 import { LlmError, type AgentRoleName, type LlmExpectation } from '@/lib/llm/types'
 import { analyzeRequirement } from '@/lib/llm/templates'
@@ -70,6 +71,15 @@ export async function createRun(input: {
   await s.addMessage({ sessionId: input.sessionId, role: 'user', content: input.userInput, runId: run.id })
   await s.updateSession(input.sessionId, { status: 'planning' })
   await emit(run.id, 'run.started', { runId: run.id, sessionId: input.sessionId, mode: input.mode })
+  logger.info({
+    event: 'run.created',
+    runId: run.id,
+    projectId: input.projectId,
+    stage: run.stage,
+    mode: input.mode,
+    requireConfirm: input.requireConfirm,
+    inputLength: input.userInput.length,
+  })
   return run
 }
 
@@ -142,11 +152,31 @@ async function callAgent<T>(params: {
         provider: res.provider,
         attempt,
       })
+      // M12：结构化日志必须能回答"哪一步、用哪个 provider、花了多久、烧了多少 token"
+      logger.info({
+        event: 'provider.call',
+        runId: run.id,
+        projectId: run.project_id,
+        stage: current.stage,
+        agent: role.key,
+        provider: res.provider,
+        durationMs: res.durationMs,
+        tokenUsage: res.usage.totalTokens,
+        attempt,
+      })
       return res.data
     } catch (err) {
       lastError = err
       const retryable = err instanceof LlmError ? err.retryable : false
       if (!retryable || attempt === MAX_ATTEMPTS) break
+      logger.warn({
+        event: 'provider.retry',
+        runId: run.id,
+        stage: current.stage,
+        agent: role.key,
+        attempt,
+        message: err instanceof Error ? err.message : '未知原因',
+      })
       await emit(run.id, 'agent.delta', {
         agent: role.agent,
         role: role.key,
@@ -156,6 +186,17 @@ async function callAgent<T>(params: {
   }
 
   const reason = lastError instanceof Error ? lastError.message : '未知原因'
+  logger.error({
+    event: 'provider.failed',
+    runId: run.id,
+    projectId: run.project_id,
+    stage: current.stage,
+    agent: role.key,
+    durationMs: Date.now() - startedAt,
+    attempts: MAX_ATTEMPTS,
+    code: lastError instanceof LlmError ? lastError.reason : 'INTERNAL',
+    message: reason,
+  })
   await emit(run.id, 'agent.finished', {
     agent: role.agent,
     role: role.key,
@@ -183,6 +224,17 @@ async function failRun(runId: string, stage: string, err: unknown): Promise<Adva
   const run = (await s.getRun(runId))!
   await s.updateSession(run.session_id, { status: 'failed' })
   await emit(runId, 'run.failed', { errorCode: code, message, stage })
+  logger.error({
+    event: 'run.failed',
+    runId,
+    projectId: run.project_id,
+    stage,
+    code,
+    message,
+    durationMs: Date.now() - Date.parse(run.started_at),
+    tokenUsage: run.token_usage,
+    callCount: run.call_count,
+  })
   return { run, status: 'failed', stage, done: true }
 }
 
@@ -237,6 +289,7 @@ export async function advanceRun(runId: string): Promise<AdvanceResult> {
   }
 
   await s.updateRun(runId, { status: 'running' })
+  logger.info({ event: 'step.started', runId, projectId: run.project_id, stage: step, mode: run.mode })
 
   try {
     switch (step) {
@@ -522,6 +575,17 @@ export async function advanceRun(runId: string): Promise<AdvanceResult> {
           verificationOk: report?.ok ?? false,
         })
         run = (await s.getRun(runId))!
+        logger.info({
+          event: 'run.finished',
+          runId,
+          projectId: run.project_id,
+          stage: 'finished',
+          durationMs: Date.now() - Date.parse(run.started_at),
+          tokenUsage: run.token_usage,
+          callCount: run.call_count,
+          version: version.version,
+          verificationOk: report?.ok ?? false,
+        })
         return { run, status: 'succeeded', stage: 'finished', done: true, payload: { version: version.version } }
       }
     }
@@ -539,6 +603,7 @@ export async function confirmRun(runId: string): Promise<AdvanceResult> {
   }
   await s.updateRun(runId, { stage: 'confirmed', status: 'running' })
   await s.updateSession(run.session_id, { status: 'generating' })
+  logger.info({ event: 'run.confirmed', runId, projectId: run.project_id, stage: 'confirmed' })
   return finishStep(runId, 'confirmed', false)
 }
 
@@ -558,6 +623,15 @@ export async function cancelRun(runId: string): Promise<AdvanceResult> {
   })
   await s.updateSession(run.session_id, { status: 'cancelled' as SessionStatus })
   await emit(runId, 'run.cancelled', { stage: run.stage })
+  logger.info({
+    event: 'run.cancelled',
+    runId,
+    projectId: run.project_id,
+    stage: run.stage,
+    durationMs: Date.now() - Date.parse(run.started_at),
+    tokenUsage: run.token_usage,
+    callCount: run.call_count,
+  })
   return { run: (await s.getRun(runId))!, status: 'cancelled', stage: 'cancelled', done: true }
 }
 

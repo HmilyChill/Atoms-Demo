@@ -200,4 +200,7 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
 - 预览沙箱 `sandbox="allow-scripts"`，**不授予同源权限**；数据访问使用 30 分钟短期令牌
 - 只读分享令牌在数据接口处被强制拒绝写入
 - API Key 只存在服务端环境变量，任何客户端响应与日志中都不出现
+  （结构化日志内置脱敏：字段名属凭据或值形似密钥一律替换为 `***`）
+- 全局安全响应头：`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、
+  `CSP frame-ancestors 'self'`、`Referrer-Policy: strict-origin-when-cross-origin`、`Permissions-Policy`
 - 公网部署时自带限流 / 单 Run 预算 / 每日熔断，避免自备额度被滥用

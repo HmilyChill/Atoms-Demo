@@ -32,11 +32,18 @@
     var node = document.createElement(tag)
     if (attrs) {
       Object.keys(attrs).forEach(function (k) {
-        if (k === 'class') node.className = attrs[k]
-        else if (k === 'text') node.textContent = attrs[k]
-        else if (k === 'html') node.innerHTML = attrs[k]
-        else if (k.indexOf('on') === 0 && typeof attrs[k] === 'function') node.addEventListener(k.slice(2), attrs[k])
-        else if (attrs[k] !== null && attrs[k] !== undefined) node.setAttribute(k, String(attrs[k]))
+        var v = attrs[k]
+        if (k === 'class') node.className = v
+        else if (k === 'text') node.textContent = v
+        else if (k === 'html') node.innerHTML = v
+        else if (k.indexOf('on') === 0 && typeof v === 'function') node.addEventListener(k.slice(2), v)
+        else if (typeof v === 'boolean') {
+          // ⚠️ 布尔属性必须"真则设、假则完全不设"。
+          // 早期实现写成 setAttribute('disabled', String(false)) → 'disabled="false"'，
+          // 而 HTML 里只要出现 disabled 属性（无论取值）按钮就会被禁用，
+          // 导致所有"通过/驳回/确认/取消"按钮点不动。
+          if (v) node.setAttribute(k, '')
+        } else if (v !== null && v !== undefined) node.setAttribute(k, String(v))
       })
     }
     // 容错：children 允许传单个节点、字符串或数组

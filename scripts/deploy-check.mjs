@@ -83,6 +83,28 @@ async function main() {
   const runtime = await fetch(`${BASE}/app-runtime.js`)
   check('渲染运行时资源可访问', runtime.status === 200, `status=${runtime.status}`)
 
+  // M11 F-M11-7：基础安全响应头（与预览沙箱策略一致）
+  check(
+    '包含 X-Content-Type-Options: nosniff',
+    home.headers.get('x-content-type-options') === 'nosniff',
+    home.headers.get('x-content-type-options') ?? '(缺失)',
+  )
+  check(
+    '包含 X-Frame-Options: SAMEORIGIN',
+    (home.headers.get('x-frame-options') ?? '').toUpperCase().includes('SAMEORIGIN'),
+    home.headers.get('x-frame-options') ?? '(缺失)',
+  )
+  check(
+    '包含 Referrer-Policy（避免预览令牌经 Referer 外泄）',
+    (home.headers.get('referrer-policy') ?? '').length > 0,
+    home.headers.get('referrer-policy') ?? '(缺失)',
+  )
+  check(
+    'CSP 的 frame-ancestors 与沙箱策略一致',
+    (home.headers.get('content-security-policy') ?? '').includes("frame-ancestors 'self'"),
+    home.headers.get('content-security-policy') ?? '(缺失)',
+  )
+
   section('3. 身份（数据隔离与持久化前提）')
   const demo = await api('/api/auth/demo', { method: 'POST' })
   check('一键体验可创建账号', demo.status === 200 && !!demo.body?.data?.id, `status=${demo.status}`)

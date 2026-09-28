@@ -401,3 +401,80 @@ test('选中元素：显式关闭 selectable 时也不出现该按钮', async ()
   await flush()
   assert.equal(findButton(document, '选择元素'), undefined)
 })
+
+// ─────────── 审批状态流转（IT-2：中等复杂度需求）───────────
+
+const S2 = '做一个活动报名与审批系统：学生提交报名，管理员审批通过或驳回，能看到自己的报名状态。'
+
+test('审批流：审批管理页的「通过」会真实把状态改为已通过（IT-2）', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S2), FIXED_TIME)
+  const mem = createMemoryAdapter({
+    applications: [{ id: 'a1', student: '张三', course: '魔药学', status: '待审批' }],
+  })
+  const { document } = boot(spec, mem.adapter)
+  await flush()
+
+  // 切到「审批管理」页
+  const navButton = findButton(document, '审批管理')
+  assert.ok(navButton, '应存在审批管理导航')
+  navButton.click()
+  await flush()
+
+  const approve = findButton(document, '通过')
+  assert.ok(approve, '应渲染出「通过」按钮')
+  approve.click()
+  await flush()
+
+  const update = mem.calls.find((c) => c.op === 'update')
+  assert.ok(update, '点击通过应触发数据更新')
+  assert.equal((update?.payload as { patch: Record<string, unknown> }).patch.status, '已通过', '状态应改为已通过')
+  assert.equal(mem.data.applications[0].status, '已通过', '适配器中的数据应真实变更')
+})
+
+test('审批流：「驳回」写入已驳回，且已通过的按钮被禁用（幂等提示）', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S2), FIXED_TIME)
+  const mem = createMemoryAdapter({
+    applications: [{ id: 'a1', student: '李四', course: '占卜学', status: '待审批' }],
+  })
+  const { document } = boot(spec, mem.adapter)
+  await flush()
+
+  findButton(document, '审批管理')?.click()
+  await flush()
+
+  const reject = findButton(document, '驳回')
+  assert.ok(reject, '应渲染出「驳回」按钮')
+  reject.click()
+  await flush()
+
+  assert.equal(mem.data.applications[0].status, '已驳回', '状态应改为已驳回')
+
+  // 状态已是已驳回后，「驳回」按钮应处于禁用态（避免重复提交）
+  const rejectAfter = findButton(document, '驳回') as HTMLButtonElement | undefined
+  assert.equal(rejectAfter?.disabled, true, '已处于该状态的按钮应被禁用')
+})
+
+test('审批流：按审批状态筛选只显示对应记录', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S2), FIXED_TIME)
+  const mem = createMemoryAdapter({
+    applications: [
+      { id: 'a1', student: '张三', course: '魔药学', status: '待审批' },
+      { id: 'a2', student: '李四', course: '占卜学', status: '已通过' },
+    ],
+  })
+  const { document, window } = boot(spec, mem.adapter)
+  await flush()
+
+  findButton(document, '审批管理')?.click()
+  await flush()
+  assert.equal(document.querySelectorAll('.atoms-table tbody tr').length, 2, '初始应显示 2 条')
+
+  const filterSelect = document.querySelector('.atoms-card select') as HTMLSelectElement
+  filterSelect.value = '已通过'
+  filterSelect.dispatchEvent(new window.Event('change', { bubbles: true }))
+  await flush()
+
+  const rows = document.querySelectorAll('.atoms-table tbody tr')
+  assert.equal(rows.length, 1, '筛选后应只剩 1 条')
+  assert.ok(rows[0].textContent?.includes('李四'), '应显示状态匹配的那一条')
+})

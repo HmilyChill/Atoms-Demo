@@ -2,6 +2,7 @@ import { verifyPreviewToken } from '@/lib/auth/preview-token'
 import { getCurrentUser } from '@/lib/auth/guard'
 import { getStore, rowToJson } from '@/lib/db/store'
 import type { AppSpec } from '@/lib/spec/types'
+import { readCompatibleSpec } from '@/lib/spec/schema-compat'
 import { PreviewHost } from './preview-host'
 
 export const dynamic = 'force-dynamic'
@@ -57,7 +58,23 @@ export default async function PreviewPage({
     )
   }
 
-  const spec = rowToJson<AppSpec>(latest.spec)
+  let spec: AppSpec
+  try {
+    // 版本兼容校验：不兼容时给出明确原因，不用近似结构强行渲染
+    spec = readCompatibleSpec(latest.spec, `v${latest.version} 的 App Spec`)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '无法读取该版本的应用数据'
+    return (
+      <div className="p-8 text-sm text-slate-600">
+        <div className="mx-auto max-w-md rounded-lg border border-amber-200 bg-amber-50 p-5">
+          <h1 className="text-base font-semibold text-amber-900">无法预览这个版本</h1>
+          <p className="mt-2 leading-relaxed">{message}</p>
+          <p className="mt-2 text-xs text-amber-800">请回到工作台生成一个新版本后再预览。</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <PreviewHost
       spec={spec}

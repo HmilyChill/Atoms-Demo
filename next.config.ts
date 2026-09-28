@@ -16,14 +16,23 @@ const nextConfig: NextConfig = {
     cpus: 1,
   },
 
-  // 生成物预览在 iframe 沙箱中加载，需要允许被内嵌
+  // M11 T-M11-7：基础安全响应头，与预览沙箱策略保持一致
+  //  - X-Frame-Options: SAMEORIGIN —— 允许我们自己的预览 iframe，但禁止被第三方嵌套
+  //  - CSP frame-ancestors 'self' 与之一致；额外关掉 object/base 注入面
+  //  - nosniff 阻止 MIME 嗅探；Referrer-Policy 避免预览令牌经 Referer 外泄
   async headers() {
     return [
       {
-        source: '/preview/:path*',
+        source: '/:path*',
         headers: [
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
-          { key: 'Content-Security-Policy', value: "frame-ancestors 'self'" },
+          {
+            key: 'Content-Security-Policy',
+            value: "frame-ancestors 'self'; object-src 'none'; base-uri 'self'",
+          },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
         ],
       },
     ]
