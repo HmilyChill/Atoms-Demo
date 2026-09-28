@@ -151,3 +151,41 @@ test('事件 eventId 在并发写入下仍单调递增且无重复', async () =>
     `eventId 应无重复且连续，实际：${JSON.stringify(ids)}`,
   )
 })
+
+test('回滚语义：以新版本追加、历史版本保留、生成物数据不丢（TST-M7-2 的存储层证据）', async () => {
+  const store = getStore()
+  const u = await store.createUser({ email: `m-${stamp}@t.local`, passwordHash: 'h', displayName: 'M' })
+  const p = await store.createProject({ ownerId: u.id, name: '回滚' })
+
+  const v1 = await store.addSpecVersion({ projectId: p.id, spec: { meta: { name: 'v1' } }, parentVersion: null })
+  await store.createRecord(p.id, 'tasks', { title: '第一条' })
+
+  const v2 = await store.addSpecVersion({
+    projectId: p.id,
+    spec: { meta: { name: 'v2' } },
+    parentVersion: v1.version,
+    changeSummary: '新增负责人字段',
+  })
+  await store.createRecord(p.id, 'tasks', { title: '第二条' })
+
+  // 回滚 = 把 v1 的内容作为**新版本**追加（而不是删掉 v2）
+  const rolled = await store.addSpecVersion({
+    projectId: p.id,
+    spec: { meta: { name: 'v1' } },
+    parentVersion: v2.version,
+    changeSummary: `回滚到 v${v1.version}`,
+  })
+
+  assert.equal(rolled.version, 3, '回滚应以新版本追加')
+  const versions = await store.listSpecVersions(p.id)
+  assert.deepEqual(
+    versions.map((v) => v.version).sort((a, b) => a - b),
+    [1, 2, 3],
+    '历史版本必须保留（回滚不是删除）',
+  )
+  assert.equal((await store.getLatestSpecVersion(p.id))?.version, 3, '当前版本应指向回滚结果')
+
+  // 关键：回滚绝不能清掉生成物的数据
+  const records = await store.listRecords(p.id, 'tasks')
+  assert.equal(records.length, 2, `回滚后生成物数据必须仍在（实际 ${records.length} 条）`)
+})
