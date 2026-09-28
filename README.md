@@ -63,7 +63,7 @@ pnpm dev          # 开发服务器
 pnpm build        # 生产构建
 pnpm start        # 启动生产服务
 pnpm typecheck    # TypeScript 类型检查（tsc --noEmit）
-pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时 / 导出包 / 工作台 UI）
+pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时 / 导出包 / 工作台 UI / Turso 协议）
 pnpm smoke        # 端到端冒烟测试（需先启动服务，见下）
 pnpm smoke:provider   # 真实模型连通性与结构化输出验证（需 DEEPSEEK_API_KEY）
 pnpm push:github      # 用 GitHub API 推送仓库（保留完整提交历史与 tag；先跑 --dry-run）
@@ -172,19 +172,21 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
    - `DAILY_CALL_LIMIT`、`RUN_CALL_BUDGET`、`RATE_LIMIT_PER_MINUTE`（可选，配额保护）
 4. 部署后访问首页自检：`/api/auth/me` 应返回 `provider.demoMode` 状态
 
-> **⚠️ 线上持久化（部署前必读）**：Vercel 的文件系统是**只读**的，因此线上**不能**用当前的本地 SQLite 文件适配器。
-> 当前 `StoreProvider` 是**同步接口**（基于 `node:sqlite` 的同步 API），而任何远程数据库都必须通过 HTTP 访问
-> ——**只能是异步**。所以接托管库需要先把存储层改成 `async` 并让全部调用点 `await`（跨全仓的重构）。
+> **✅ 线上持久化（已支持）**：Vercel 的文件系统是**只读**的，因此线上不能用本地 SQLite 文件。
+> 本项目已内置 **Turso（SQL over HTTP）执行器**——只要配置下面两个环境变量，
+> 存储层会**自动**从本地 SQLite 切换到远程库，**无需修改任何代码**：
 >
-> 两条路径（详见 `docs/05-执行记录与跳过项.md` §7.1）：
+> ```bash
+> TURSO_DATABASE_URL=https://<db>-<org>.turso.io   # 或 libsql:// / turso://（会自动转 https）
+> TURSO_AUTH_TOKEN=<token>
+> ```
 >
-> | 路径 | 需要改代码 | 做法 |
-> |---|---|---|
-> | **A. 换部署形态（最快）** | ❌ **零改动** | 部署到带持久卷的容器平台（Railway / Fly / VPS / Oracle Always Free），SQLite 文件照常工作 |
-> | **B. 留在 Vercel** | ✅ 需重构 | 存储层改异步 + 实现 `TursoStore`（Turso SQL over HTTP，纯 `fetch` 零依赖；协议已核对） |
+> 存储层的实现方式：`SqlExecutor` 抽象出"如何连数据库"，`SqlStore` 只写一次 SQL；
+> 本地用 Node 内置 `node:sqlite`（零原生依赖），线上用 Turso 纯 `fetch`（零新依赖）。
+> 协议实现有 9 项测试覆盖（含一个本地 Turso 协议模拟服务做端到端验证）。
 >
-> 在完成其中之一之前，部署到 Vercel 的表现是：生成、预览、导出、分享都正常，但**服务端数据不持久化**。
-> 这是本项目当前唯一的功能性缺口。
+> **另一条路径**：若不想引入托管库，也可部署到带持久卷的容器平台（Railway / Fly / VPS / Oracle Always Free），
+> 那样**零配置**即可继续用 SQLite 文件。
 
 ---
 

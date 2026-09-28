@@ -806,3 +806,12 @@ export function resetStore(): void {
   globalForStore.__atomsStore?.close()
   globalForStore.__atomsStore = undefined
 }
+
+/**
+ * 用指定执行器创建存储实例。
+ * 用途：测试（对 Turso 协议做端到端验证时，可注入指向本地模拟服务的执行器），
+ * 以及将来需要同时连多个库的场景。
+ */
+export function createStoreWithExecutor(executor: SqlExecutor): StoreProvider {
+  return new SqlStore(executor)
+}

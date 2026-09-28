@@ -10,7 +10,7 @@
  *
  * 注意：用 createElement 而非 JSX —— Node 的类型剥离只删类型、不做 JSX 转换。
  */
-import { test } from 'node:test'
+import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { JSDOM } from 'jsdom'
 import { MessageChannel as NodeMessageChannel } from 'node:worker_threads'
@@ -213,10 +213,28 @@ class FakeEventSource {
   }
 }
 
-setGlobal('fetch', fakeFetch)
-setGlobal('EventSource', FakeEventSource)
-;(dom.window as unknown as Record<string, unknown>).fetch = fakeFetch
-;(dom.window as unknown as Record<string, unknown>).EventSource = FakeEventSource
+/**
+ * ⚠️ fetch / EventSource 的替身只在**本文件的测试期间**生效。
+ * 原因：本项目用 --test-isolation=none 让所有测试跑在同一进程（沙箱禁止派生子进程），
+ * 若在模块加载时就覆盖全局 fetch，会污染同进程的其它测试
+ * ——例如 Turso 协议测试需要真实 fetch 去访问本地模拟服务。
+ */
+const realFetch = globalThis.fetch
+const realEventSource = (globalThis as unknown as Record<string, unknown>).EventSource
+
+before(() => {
+  setGlobal('fetch', fakeFetch)
+  setGlobal('EventSource', FakeEventSource)
+  ;(dom.window as unknown as Record<string, unknown>).fetch = fakeFetch
+  ;(dom.window as unknown as Record<string, unknown>).EventSource = FakeEventSource
+})
+
+after(() => {
+  setGlobal('fetch', realFetch)
+  setGlobal('EventSource', realEventSource)
+  ;(dom.window as unknown as Record<string, unknown>).fetch = realFetch
+  ;(dom.window as unknown as Record<string, unknown>).EventSource = realEventSource
+})
 
 // 环境就绪后再导入 React 与组件
 const React = await import('react')
