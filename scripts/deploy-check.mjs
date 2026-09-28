@@ -159,6 +159,31 @@ async function main() {
   const exported = await fetch(`${BASE}/api/projects/${projectId}/export`, { headers: { Cookie: cookie } })
   const exportHtml = await exported.text()
   check('可导出单文件应用', exported.status === 200 && exportHtml.includes('AtomsRuntime'))
+  check(
+    '单文件导出不引用外部资源（离线可运行）',
+    !/<script[^>]+src=/i.test(exportHtml) && !/<link[^>]+href=/i.test(exportHtml),
+  )
+
+  const zipExported = await fetch(`${BASE}/api/projects/${projectId}/export?format=zip`, {
+    headers: { Cookie: cookie },
+  })
+  const zipBuf = Buffer.from(await zipExported.arrayBuffer())
+  check(
+    '可导出多文件工程 ZIP',
+    zipExported.status === 200 && zipBuf[0] === 0x50 && zipBuf[1] === 0x4b,
+    `status=${zipExported.status} bytes=${zipBuf.length}`,
+  )
+  check(
+    'ZIP 的 Content-Type 正确',
+    (zipExported.headers.get('content-type') ?? '').includes('application/zip'),
+    zipExported.headers.get('content-type') ?? '',
+  )
+  // 曾出现：Content-Disposition 里带中文项目名 → HTTP 头要求 Latin-1 → 500
+  check(
+    'ZIP 响应头不含非 Latin-1 字符（中文项目名需 RFC 5987 编码）',
+    !/[^\u0000-\u00ff]/.test(zipExported.headers.get('content-disposition') ?? ''),
+    zipExported.headers.get('content-disposition') ?? '',
+  )
 
   const noAuth = await fetch(`${BASE}/api/projects`)
   check('未登录访问被拒', noAuth.status === 401, `status=${noAuth.status}`)

@@ -484,6 +484,12 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
           >
             导出单文件应用
           </a>
+          <a
+            href={`/api/projects/${projectId}/export?format=zip`}
+            className={`rounded-md border border-slate-300 px-3 py-1 text-slate-600 hover:bg-slate-50 ${spec ? '' : 'pointer-events-none opacity-50'}`}
+          >
+            导出工程 ZIP
+          </a>
         </div>
       </header>
 

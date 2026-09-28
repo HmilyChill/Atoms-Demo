@@ -4,14 +4,19 @@ import type { NextRequest } from 'next/server'
 import { requireUser } from '@/lib/auth/guard'
 import { getStore, rowToJson } from '@/lib/db/store'
 import { AppError } from '@/lib/errors'
+import { toErrorResponse } from '@/lib/errors'
 import type { AppSpec } from '@/lib/spec/types'
-import { buildExportHtml, slugify } from '@/lib/export/build-export-html'
+import { buildExportHtml, buildExportProjectFiles, slugify, type ExportParams } from '@/lib/export/build-export-html'
+import { createZip } from '@/lib/export/zip'
 
 /**
- * 导出（M13）：返回一个自包含、可离线运行的单文件 HTML。
- * 构建逻辑在 src/lib/export/build-export-html.ts（独立模块，便于直接测试"导出包真的能跑"）。
+ * 导出（M13）。支持两种形态：
+ *  - 默认：**单文件 HTML**（运行时与 Spec 内联，双击即可离线运行）
+ *  - `?format=zip`：**多文件工程 ZIP**（index.html + app-runtime.js + spec.json + README.md）
+ *
+ * 构建逻辑在 src/lib/export/ 下（独立模块，便于直接测试"导出包真的能跑"）。
  */
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
   try {
     const user = await requireUser()
     const { id } = await ctx.params
@@ -23,11 +28,11 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
       throw new AppError('CONFLICT', '该项目还没有生成过应用，暂无内容可导出', '请先生成一次应用再导出')
     }
 
+    const format = new URL(req.url).searchParams.get('format') === 'zip' ? 'zip' : 'html'
     const spec = rowToJson<AppSpec>(latest.spec)
-    const runtimePath = path.join(process.cwd(), 'public', 'app-runtime.js')
-    const runtimeSource = readFileSync(runtimePath, 'utf8')
+    const runtimeSource = readFileSync(path.join(process.cwd(), 'public', 'app-runtime.js'), 'utf8')
 
-    const html = buildExportHtml({
+    const params: ExportParams = {
       appName: spec.meta?.name ?? project.name,
       projectName: project.name,
       version: latest.version,
@@ -35,9 +40,27 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
       runtimeSource,
       projectId: id,
       exportedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
-    })
+    }
 
-    const filename = `${slugify(project.name)}.html`
+    const base = slugify(project.name)
+
+    if (format === 'zip') {
+      const zip = createZip(buildExportProjectFiles(params))
+      // HTTP 头必须是 Latin-1：中文项目名不能直接进 Content-Disposition，需按 RFC 5987 编码
+      const zipName = `${base}-project.zip`
+      return new Response(new Uint8Array(zip), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(zipName)}"; filename*=UTF-8''${encodeURIComponent(zipName)}`,
+          'Content-Length': String(zip.length),
+          'Cache-Control': 'no-store',
+        },
+      })
+    }
+
+    const html = buildExportHtml(params)
+    const filename = `${base}.html`
     return new Response(html, {
       status: 200,
       headers: {
@@ -47,12 +70,11 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
       },
     })
   } catch (err) {
-    const status = err instanceof AppError ? err.status : 500
-    const message = err instanceof AppError ? err.message : '导出失败'
-    const hint = err instanceof AppError ? err.hint : undefined
-    return new Response(
-      JSON.stringify({ error: { code: err instanceof AppError ? err.code : 'INTERNAL', message, hint } }),
-      { status, headers: { 'Content-Type': 'application/json' } },
-    )
+    // 用统一的错误映射：非预期错误会把真实原因放进 hint，便于部署后排查（否则只剩一句"导出失败"）
+    const { status, body } = toErrorResponse(err)
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
   }
 }

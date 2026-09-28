@@ -6,19 +6,22 @@
  * 本测试把导出的 HTML 真正加载进 jsdom 并执行其内联脚本，验证：
  *   ① 无网络也能渲染    ② 能真实录入数据    ③ 重新打开后数据仍在    ④ 全程零网络请求
  */
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import path from 'node:path'
 import { JSDOM } from 'jsdom'
 
 import { analyzeRequirement, buildTemplateSpec } from '@/lib/llm/templates'
 import {
   buildExportHtml,
+  buildExportProjectFiles,
   escapeForInlineScript,
   exportStorageKey,
   slugify,
 } from '@/lib/export/build-export-html'
+import { createZip, crc32, readZip } from '@/lib/export/zip'
 
 const RUNTIME_SOURCE = readFileSync(path.join(process.cwd(), 'public', 'app-runtime.js'), 'utf8')
 const FIXED_TIME = '2026-01-01T00:00:00.000Z'
@@ -214,4 +217,128 @@ test('导出包：注入含 </script 的文本不会破坏文档结构', async (
   assert.equal(runtimeErrors.length, 0, `不应有运行时错误：${JSON.stringify(runtimeErrors)}`)
   assert.notEqual((window as unknown as { __hacked?: boolean }).__hacked, true, '注入的脚本不应被执行')
   assert.ok(document.querySelector('form'), '应用仍应正常渲染')
+})
+
+// ─────────── 多文件工程 ZIP 导出 ───────────
+
+function makeZip() {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const files = buildExportProjectFiles({
+    appName: spec.meta.name,
+    projectName: '导出测试项目',
+    version: 3,
+    spec,
+    runtimeSource: RUNTIME_SOURCE,
+    projectId: PROJECT_ID,
+    exportedAt: '2026-01-01 00:00:00',
+  })
+  return { spec, files, zip: createZip(files) }
+}
+
+function fileMap(files: Array<{ name: string; content: string }>): Record<string, string> {
+  return Object.fromEntries(files.map((f) => [f.name, f.content]))
+}
+
+test('ZIP：crc32 与标准测试向量一致', () => {
+  // 标准向量："123456789" 的 CRC-32 = 0xCBF43926
+  assert.equal(crc32(Buffer.from('123456789', 'utf8')), 0xcbf43926)
+  assert.equal(crc32(Buffer.from('', 'utf8')), 0)
+})
+
+test('ZIP：结构合法、条目完整、每个条目 CRC 正确', () => {
+  const { zip, files } = makeZip()
+  const result = readZip(zip)
+
+  assert.equal(result.valid, true, `ZIP 应结构合法：${result.error ?? ''}`)
+  assert.deepEqual(
+    result.entries.map((e) => e.name).sort(),
+    ['README.md', 'app-runtime.js', 'index.html', 'spec.json'],
+    '应包含 4 个工程文件',
+  )
+  assert.ok(
+    result.entries.every((e) => e.crcOk),
+    '每个条目的 CRC32 都应与中央目录记录一致',
+  )
+
+  // 内容与源文件一致
+  const byName = fileMap(files)
+  const runtimeEntry = result.entries.find((e) => e.name === 'app-runtime.js')
+  assert.equal(runtimeEntry?.content.toString('utf8'), RUNTIME_SOURCE, 'app-runtime.js 应与运行时源码一致')
+  assert.equal(byName['README.md'].includes('index.html'), true, 'README 应说明入口文件')
+  assert.ok(JSON.parse(byName['spec.json']).pages.length > 0, 'spec.json 应是可解析的 App Spec')
+})
+
+test('ZIP：index.html 外链运行时（工程结构），且不再是自包含单文件', () => {
+  const { files } = makeZip()
+  const byName = fileMap(files)
+  const index = byName['index.html']
+
+  assert.ok(index.includes('src="./app-runtime.js"'), '应通过相对路径引入运行时')
+  assert.ok(!index.includes('function renderApp'), 'index.html 不应再内联运行时实现')
+  assert.ok(index.includes('"dataModels"'), 'Spec 仍内联在 index.html 中（file:// 下 fetch 受限）')
+})
+
+async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return true
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  return false
+}
+
+test('ZIP：解压后的多文件工程真的能跑（外链运行时 + 可交互 + 数据落库）', async () => {
+  const { spec, files } = makeZip()
+  const byName = fileMap(files)
+
+  // 用本地静态服务模拟"解压后的目录"，让 jsdom 通过 HTTP 真实加载外链的 app-runtime.js
+  const server = createServer((req, res) => {
+    const name = decodeURIComponent((req.url ?? '/').split('?')[0]).replace(/^\/+/, '') || 'index.html'
+    const content = byName[name]
+    if (!content) {
+      res.writeHead(404)
+      res.end('not found')
+      return
+    }
+    const type = name.endsWith('.js')
+      ? 'text/javascript; charset=utf-8'
+      : name.endsWith('.json')
+        ? 'application/json; charset=utf-8'
+        : 'text/html; charset=utf-8'
+    res.writeHead(200, { 'Content-Type': type })
+    res.end(content)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  after(() => server.close())
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+
+  const dom = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
+    runScripts: 'dangerously',
+    resources: 'usable',
+    pretendToBeVisual: true,
+  })
+  const { window } = dom
+
+  const loaded = await waitFor(
+    () => typeof (window as unknown as { AtomsRuntime?: unknown }).AtomsRuntime !== 'undefined',
+  )
+  assert.ok(loaded, '外链的 app-runtime.js 应被加载')
+
+  const ready = await waitFor(() => Boolean(window.document.querySelector('form')))
+  assert.ok(ready, '应用应渲染出表单（说明多文件工程可运行）')
+  assert.equal(window.document.querySelector('h1')?.textContent, spec.meta.name, '应渲染应用名')
+
+  // 真实交互：填表提交 → 数据落 localStorage
+  const form = window.document.querySelector('form') as HTMLFormElement
+  ;(form.querySelector('input, textarea') as HTMLInputElement).value = '解压后也能用'
+  ;(form.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+  const saved = await waitFor(() => window.localStorage.getItem(exportStorageKey(PROJECT_ID)) !== null)
+  assert.ok(saved, '提交后应写入 localStorage')
+
+  const parsed = JSON.parse(window.localStorage.getItem(exportStorageKey(PROJECT_ID)) ?? '{}') as Record<
+    string,
+    Array<Record<string, unknown>>
+  >
+  assert.equal(parsed.tasks?.[0]?.title, '解压后也能用', '写入内容应正确')
 })
