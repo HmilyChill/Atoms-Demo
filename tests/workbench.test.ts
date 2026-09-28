@@ -58,12 +58,14 @@ interface FetchCall {
 }
 
 const calls: FetchCall[] = []
-/** 由各测试设置：step 接口依次返回的 done 值 */
-let stepResponses: boolean[] = [true]
+/** 由各测试设置：step 接口依次返回的 done 值；'hang' 表示该请求永不返回 */
+let stepResponses: boolean[] | 'hang' = [true]
 /** 由各测试设置：项目是否已有 Spec（决定按钮是「开始生成」还是「提交迭代」） */
 let specAvailable = true
 /** 由各测试设置：是否停在"等待确认"Gate（用于测契约编辑） */
 let awaitingGate = false
+/** 由各测试设置：项目详情里返回的"进行中的 Run"（用于测刷新后恢复） */
+let resumeRun: Record<string, unknown> | null = null
 
 function jsonResponse(data: unknown): Response {
   return { ok: true, status: 200, json: async () => ({ data }) } as unknown as Response
@@ -185,6 +187,28 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
   if (/\/api\/runs$/.test(url) && method === 'POST') {
     return jsonResponse({ runId: 'run_wb_1', sessionId: 's1', mode: 'create', status: 'pending', stage: 'created' })
   }
+  if (url.includes('/messages')) {
+    return jsonResponse({
+      sessionId: 's1',
+      messages: [
+        { id: 'm1', role: 'user', content: '做一个待办清单', runId: 'run_wb_1', createdAt: FIXED_TIME },
+        { id: 'm2', role: 'agent', content: 'Mike（团队领导 · 计划）已完成：120 tokens · 42ms', runId: 'run_wb_1', createdAt: FIXED_TIME },
+      ],
+    })
+  }
+  if (url.includes('/cancel') && method === 'POST') {
+    return jsonResponse({
+      run: { id: 'run_wb_1', status: 'cancelled', stage: 'cancelled', mode: 'create', errorCode: null, errorMessage: null, tokenUsage: 0, callCount: 1 },
+    })
+  }
+  if (/\/api\/projects\/proj_wb$/.test(url)) {
+    return jsonResponse({
+      project: { id: 'proj_wb', name: '工作台测试项目' },
+      sessions: [],
+      runs: resumeRun ? [resumeRun] : [],
+      hasSpec: specAvailable,
+    })
+  }
   if (url.includes('/contract') && method === 'POST') {
     return jsonResponse({ data: { ok: true } })
   }
@@ -209,6 +233,7 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
     })
   }
   if (url.includes('/step')) {
+    if (stepResponses === 'hang') return new Promise<Response>(() => {})
     const done = stepResponses.length > 0 ? (stepResponses.shift() as boolean) : true
     return jsonResponse({
       run: {
@@ -292,7 +317,15 @@ function container(): HTMLElement {
   return dom.window.document.getElementById('root') as HTMLElement
 }
 
-async function mount(options: { spec?: boolean; steps?: boolean[]; gate?: boolean } = {}) {
+interface MountOptions {
+  spec?: boolean
+  steps?: boolean[] | 'hang'
+  gate?: boolean
+  /** 项目详情接口里返回的"进行中的 Run" */
+  resume?: Record<string, unknown> | null
+}
+
+async function mount(options: MountOptions = {}) {
   resetStubs(options)
   calls.length = 0
   FakeEventSource.instances = []
@@ -309,10 +342,11 @@ async function mount(options: { spec?: boolean; steps?: boolean[]; gate?: boolea
 }
 
 /** 重置所有可变桩状态，避免测试互相污染 */
-function resetStubs(options: { spec?: boolean; steps?: boolean[]; gate?: boolean } = {}) {
+function resetStubs(options: MountOptions = {}) {
   specAvailable = options.spec ?? true
   stepResponses = options.steps ?? [true]
   awaitingGate = options.gate ?? false
+  resumeRun = options.resume ?? null
 }
 
 function findButton(text: string): HTMLButtonElement | null {
@@ -702,4 +736,131 @@ test('工作台：回滚必须二次确认，未确认前不得触碰历史版�
   assert.ok(rollback, '确认后应发起回滚')
   assert.ok(rollback?.url.includes('/versions/1/rollback'), `应回滚到被点的那一版，实际：${rollback?.url}`)
   assert.ok(container().textContent?.includes('已回滚到 v1'), '应给出回滚结果反馈')
+})
+
+test('工作台：取消生成后本地状态立即更新（不能一直显示"生成中…"）', async () => {
+  // step 一直挂起：模拟"服务端正卡在某一步"，此时用户点取消
+  await mount({ steps: 'hang' })
+  await typeRequirement('待办清单')
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(20)
+  })
+
+  const cancel = findButton('取消')
+  assert.ok(cancel, '生成中应提供取消入口')
+  assert.ok(container().textContent?.includes('生成中'), '顶栏应显示生成中')
+
+  await React.act(async () => {
+    cancel?.click()
+    await flush(12)
+  })
+
+  assert.ok(callsTo('/cancel').length > 0, '应调用取消接口')
+  assert.ok(container().textContent?.includes('已取消本次生成'), '应给出取消反馈')
+  // 关键：本地状态必须马上跟后端一致，否则界面会一直"转圈"
+  assert.ok(
+    container().textContent?.includes('已取消'),
+    `取消后应立即显示已取消状态，实际：${container().textContent?.slice(0, 200)}`,
+  )
+})
+
+test('工作台：刷新后能恢复未完成的生成任务，并续上事件流（F-M2-6 / IT-6）', async () => {
+  // 服务端有一个"进行中"的 Run（模拟：用户刷新前正在生成）
+  await mount({
+    steps: [true],
+    resume: { id: 'run_wb_1', status: 'running', stage: 'paged', mode: 'create', errorMessage: null, tokenUsage: 300, callCount: 2 },
+  })
+  await flush(10)
+
+  assert.ok(callsTo('/api/projects/proj_wb').length > 0, '挂载时应拉一次项目详情以恢复状态')
+  assert.ok(
+    container().textContent?.includes('已恢复上次未完成的生成任务'),
+    `应提示已恢复，实际：${container().textContent?.slice(0, 200)}`,
+  )
+  const es = FakeEventSource.instances[0]
+  assert.ok(es?.url.includes('/api/runs/run_wb_1/events'), '恢复后应重新订阅该 Run 的事件流')
+  assert.ok(callsTo('/step').length > 0, '恢复后应继续推进（而不是让任务僵住）')
+})
+
+test('工作台：恢复停在 Gate 的任务时不自动推进，而是等用户确认', async () => {
+  await mount({
+    gate: true,
+    resume: {
+      id: 'run_wb_1',
+      status: 'awaiting_confirm',
+      stage: 'gate',
+      mode: 'create',
+      errorMessage: null,
+      tokenUsage: 120,
+      callCount: 1,
+    },
+  })
+  await flush(10)
+
+  assert.ok(container().textContent?.includes('已恢复上次未确认的生成任务'), '应提示等待确认')
+  assert.equal(callsTo('/step').length, 0, 'Gate 状态不应自动推进生成')
+  assert.ok(findButton('确认计划与需求契约，继续生成'), '应给出确认入口')
+})
+
+test('工作台：超长需求在输入时就被拦住（不浪费一次生成额度）', async () => {
+  await mount()
+  const textarea = container().querySelector('textarea') as HTMLTextAreaElement
+
+  await React.act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    setter?.call(textarea, 'x'.repeat(4001))
+    textarea.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+    await flush(4)
+  })
+
+  assert.ok(container().textContent?.includes('上限 4000 字'), '应显示长度上限')
+  assert.ok(container().textContent?.includes('超出上限'), '超限时应就地给出提示')
+
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(8)
+  })
+  assert.equal(callsTo('/api/runs').length, 0, '超长输入不应发起生成')
+})
+
+test('工作台：会话记录可见且区分"我 / 智能体"（F-M2-2）', async () => {
+  await mount()
+  await flush(6)
+
+  assert.ok(callsTo('/messages').length > 0, '应拉取会话消息历史')
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('会话记录'), '应有会话记录区块')
+  assert.ok(text.includes('做一个待办清单'), '应显示用户说过的话')
+  assert.ok(text.includes('Mike'), '应显示智能体的产出记录')
+  assert.ok(text.includes('我'), '应区分"我"与智能体')
+})
+
+test('工作台：预览错误横幅带出位置与建议（F-M6-4）', async () => {
+  await mount()
+  await React.act(async () => {
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: {
+          source: 'atoms-preview',
+          type: 'error',
+          payload: {
+            scope: '渲染 chart',
+            message: 'yField 指向不存在的字段',
+            pageTitle: '数据看板',
+            componentId: 'c-chart',
+            componentType: 'chart',
+            suggestion: '该组件的结构可能不合法，可让智能体重做这个组件',
+          },
+        },
+      }),
+    )
+    await flush(6)
+  })
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('预览内捕获到运行时错误'), '宿主应显示错误横幅')
+  assert.ok(text.includes('数据看板'), '应指出出错页面')
+  assert.ok(text.includes('c-chart'), '应指出出错组件')
+  assert.ok(text.includes('建议：'), '应给出可执行建议而不是只有一句报错')
 })

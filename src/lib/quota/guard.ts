@@ -47,9 +47,9 @@ export interface RateLimitResult {
   remaining: number
 }
 
-export function checkRateLimit(key: string, now = Date.now()): RateLimitResult {
+export function checkRateLimit(key: string, now = Date.now(), limitOverride?: number): RateLimitResult {
   const s = state(now)
-  const limit = env.rateLimitPerMinute
+  const limit = limitOverride ?? env.rateLimitPerMinute
   const entry = s.windows.get(key)
   if (!entry || now - entry.windowStart >= WINDOW_MS) {
     s.windows.set(key, { windowStart: now, count: 1 })
@@ -60,6 +60,16 @@ export function checkRateLimit(key: string, now = Date.now()): RateLimitResult {
     return { ok: false, retryAfterSec: Math.ceil((entry.windowStart + WINDOW_MS - now) / 1000), remaining: 0 }
   }
   return { ok: true, remaining: Math.max(0, limit - entry.count) }
+}
+
+/**
+ * 生成类请求的限流（F-M11-2）：比普通数据读写**更严格**。
+ *
+ * 为什么必须分级：一次生成会连带多次模型调用与落库，成本远高于一次记录读写；
+ * 共用一个阈值等于"用读接口的宽松度去保护最贵的操作"。
+ */
+export function checkGenerateRateLimit(key: string, now = Date.now()): RateLimitResult {
+  return checkRateLimit(`generate:${key}`, now, env.rateLimitGeneratePerMinute)
 }
 
 export interface QuotaDecision {

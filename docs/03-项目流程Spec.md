@@ -95,7 +95,7 @@
 
 > 统一约定：JSON 交互；鉴权用 HttpOnly Cookie；所有响应含 `traceId`。
 >
-> **下表已与实现逐条对齐**（业务路由 29 条 = 下表全部行；`pnpm build` 的清单共 31 条，
+> **下表已与实现逐条对齐**（业务路由 30 条 = 下表全部行；`pnpm build` 的清单共 32 条，
 > 另 2 条是 Next 内部页 `_not-found` / `_global-error`）。
 > 早期版本的本表曾列出一条 **从未实现** 的 `POST /api/runs/:id/repair`（已删除）；
 > 修复动作实际由编排器在 `step` 内部按上限自动执行，不需要单独接口。
@@ -111,6 +111,7 @@
 | GET / POST | `/api/projects` | 列出 / 新建项目 |
 | GET / PATCH / DELETE | `/api/projects/:id` | 项目详情 / 重命名 / 删除 |
 | GET / POST | `/api/projects/:id/sessions` | 会话列表 / 新建会话 |
+| GET | `/api/projects/:id/messages` | **会话消息历史**（`?sessionId=`，默认第一个会话）——刷新后仍能回看"我说了什么、它做了什么" |
 | POST | `/api/runs` | 启动一次生成，返回 `runId` |
 | GET | `/api/runs/:id` | Run 快照 + 产物列表（**事件丢失后对齐，也是"产物归约"的数据源**） |
 | POST | `/api/runs/:id/step` | **推进一步**（短步骤执行，前端循环调用以规避函数超时） |

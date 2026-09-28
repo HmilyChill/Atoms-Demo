@@ -1,3 +1,4 @@
+import { notFound } from 'next/navigation'
 import { verifyPreviewToken } from '@/lib/auth/preview-token'
 import { getCurrentUser } from '@/lib/auth/guard'
 import { getStore, rowToJson } from '@/lib/db/store'
@@ -33,17 +34,9 @@ export default async function PreviewPage({
   }
 
   if (!allowed) {
-    return (
-      <div className="p-8 text-sm text-slate-600">
-        <div className="mx-auto max-w-md rounded-lg border border-red-200 bg-red-50 p-5">
-          <h1 className="text-base font-semibold text-red-800">无法打开预览</h1>
-          <p className="mt-2 leading-relaxed">
-            预览链接无效或已过期（预览令牌有效期 30 分钟，分享链接 7 天）。
-            请回到工作台重新打开预览。
-          </p>
-        </div>
-      </div>
-    )
+    // 无效/篡改/过期令牌一律 404（TST-M13-2）：
+    // 200 的"友好错误页"会让"令牌是否有效"在状态码层面无法区分，也让爬取者以为命中了资源。
+    notFound()
   }
 
   const latest = await getStore().getLatestSpecVersion(id)

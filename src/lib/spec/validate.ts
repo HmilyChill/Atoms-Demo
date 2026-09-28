@@ -3,6 +3,7 @@ import {
   FIELD_TYPE_WHITELIST,
   SPEC_SCHEMA_VERSION,
   type AppSpec,
+  type SpecAction,
   type SpecComponent,
   type SpecDataModel,
   type SpecField,
@@ -32,6 +33,16 @@ const REQUIRED_MODEL_COMPONENTS: ReadonlyArray<SpecComponent['type']> = [
   'chart',
   'filter',
 ]
+
+/**
+ * 动作白名单：**只允许运行时真正实现的动作**。
+ *
+ * `SpecAction['kind']` 的类型里还有 `update`（行内编辑），但 `public/app-runtime.js`
+ * 目前只实现了 create（表单提交）/ delete / status / toggle / navigate。
+ * 按"超范围必须报错、绝不静默近似"的原则，这里把未实现的动作判为错误
+ * ——否则会出现"校验通过但按钮点了没反应"的假通过（这正是 M8 要防的事）。
+ */
+const ACTION_KINDS: ReadonlyArray<SpecAction['kind']> = ['create', 'delete', 'status', 'toggle', 'navigate']
 
 /**
  * Spec 校验（I-10）：结构校验 + 语义校验（引用完整性）。
@@ -138,7 +149,9 @@ export function validateSpec(input: unknown): ValidationResult {
         issues.push({ path: `${p}.components`, message: '页面至少需要一个组件', severity: 'error' })
         return
       }
-      pg.components.forEach((c, ci) => validateComponent(c, `${p}.components[${ci}]`, modelNames, issues))
+      pg.components.forEach((c, ci) =>
+        validateComponent(c, `${p}.components[${ci}]`, modelNames, pageIds, issues),
+      )
     })
   }
 
@@ -175,6 +188,7 @@ function validateComponent(
   c: unknown,
   path: string,
   modelNames: Set<string>,
+  pageIds: Set<string>,
   issues: ValidationIssue[],
 ): void {
   if (!isPlainObject(c)) {
@@ -204,7 +218,7 @@ function validateComponent(
           return
         }
         t.components.forEach((cc, ci) =>
-          validateComponent(cc, `${path}.tabs[${ti}].components[${ci}]`, modelNames, issues),
+          validateComponent(cc, `${path}.tabs[${ti}].components[${ci}]`, modelNames, pageIds, issues),
         )
       })
     }
@@ -220,6 +234,64 @@ function validateComponent(
         severity: 'error',
       })
     }
+  }
+
+  // 动作的引用完整性（F-M5-2 / TST-M5-2）：
+  // 契约把 action 当成"可机检项"，如果动作指向不存在的页面/字段，
+  // 就会出现"契约判定通过、但按钮点了没反应"的假通过。
+  validateAction(comp.action, `${path}.action`, modelNames, pageIds, issues)
+  ;(comp.rowActions ?? []).forEach((a, ai) =>
+    validateAction(a, `${path}.rowActions[${ai}]`, modelNames, pageIds, issues),
+  )
+}
+
+function validateAction(
+  a: unknown,
+  path: string,
+  modelNames: Set<string>,
+  pageIds: Set<string>,
+  issues: ValidationIssue[],
+): void {
+  if (a === undefined || a === null) return
+  if (!isPlainObject(a)) {
+    issues.push({ path, message: '动作必须是对象', severity: 'error' })
+    return
+  }
+  const action = a as unknown as SpecAction
+  if (!ACTION_KINDS.includes(action.kind)) {
+    issues.push({
+      path: `${path}.kind`,
+      message: `不支持的动作类型「${String(action.kind)}」。当前运行时已实现：${ACTION_KINDS.join(' / ')}`,
+      severity: 'error',
+    })
+    return
+  }
+  if (typeof action.label !== 'string' || action.label.trim() === '') {
+    issues.push({ path: `${path}.label`, message: '动作缺少按钮文案（label）', severity: 'error' })
+  }
+  if (action.model !== undefined && !modelNames.has(action.model)) {
+    issues.push({
+      path: `${path}.model`,
+      message: `动作引用了不存在的数据集合：${action.model}`,
+      severity: 'error',
+    })
+  }
+  if (action.kind === 'navigate') {
+    if (typeof action.targetPageId !== 'string' || !pageIds.has(action.targetPageId)) {
+      issues.push({
+        path: `${path}.targetPageId`,
+        message: `navigate 动作指向了不存在的页面：${String(action.targetPageId)}`,
+        severity: 'error',
+      })
+    }
+  }
+  // status / toggle 必须以字段名为参数，否则运行时无从下手
+  if ((action.kind === 'status' || action.kind === 'toggle') && (typeof action.field !== 'string' || action.field.trim() === '')) {
+    issues.push({
+      path: `${path}.field`,
+      message: `${action.kind} 动作必须声明要改哪个字段（field）`,
+      severity: 'error',
+    })
   }
 }
 

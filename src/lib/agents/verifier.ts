@@ -24,7 +24,18 @@ export interface VerificationReport {
   checkedAt: string
   structural: { ok: boolean; issues: ValidationIssue[] }
   render: { ok: boolean; errors: string[]; pagesChecked: number; componentsChecked: number }
-  contract: { total: number; passed: ContractItemResult[]; failed: ContractItemResult[] }
+  contract: {
+    total: number
+    passed: ContractItemResult[]
+    failed: ContractItemResult[]
+    /**
+     * 验收点：**人类可读、无法机检**（F-M8-3）。
+     * 单独列出来而不是混进 total / unverified：
+     *  - 混进 total 会让人以为它被机检过（假通过）；
+     *  - 混进 unverified 会让每次生成都变成"未校验"，等于这个字段失去意义。
+     */
+    acceptance: string[]
+  }
   /** 因校验器异常等原因无法判定的项 */
   unverified: string[]
   summary: string
@@ -148,7 +159,7 @@ export function verifySpec(specInput: unknown, contract: Contract | null): Verif
 
   let structural: VerificationReport['structural'] = { ok: false, issues: [] }
   let render: VerificationReport['render'] = { ok: false, errors: [], pagesChecked: 0, componentsChecked: 0 }
-  let contractResult: VerificationReport['contract'] = { total: 0, passed: [], failed: [] }
+  let contractResult: VerificationReport['contract'] = { total: 0, passed: [], failed: [], acceptance: [] }
 
   try {
     const v = validateSpec(specInput)
@@ -174,6 +185,7 @@ export function verifySpec(specInput: unknown, contract: Contract | null): Verif
           total: evaluation.total,
           passed: evaluation.passed.map((r) => ({ id: r.item.id, text: r.item.text })),
           failed: evaluation.failed.map((r) => ({ id: r.item.id, text: r.item.text, reason: r.reason })),
+          acceptance: (contract.acceptance ?? []).map((a) => String(a)),
         }
       } catch (err) {
         unverified.push(`契约核对执行异常：${err instanceof Error ? err.message : String(err)}`)
@@ -196,6 +208,10 @@ export function verifySpec(specInput: unknown, contract: Contract | null): Verif
         ? `契约 ${contractResult.total} 项全部通过`
         : `契约 ${contractResult.failed.length}/${contractResult.total} 项未通过`,
     )
+    // 验收点如实单独声明：不混进"通过项"，也不冒充"未校验"（后者会让每次生成都变成部分通过）
+    if (contractResult.acceptance.length > 0) {
+      parts.push(`${contractResult.acceptance.length} 条验收点无法机检、需人工确认`)
+    }
   }
   if (unverified.length > 0) parts.push(`${unverified.length} 项未校验`)
 

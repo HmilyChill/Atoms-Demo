@@ -116,6 +116,14 @@ async function callAgent<T>(params: {
       '可以缩小需求范围后重试，或稍后重新发起生成',
     )
   }
+  // token 预算（F-M11-3）：只限次数挡不住"次数没超、额度先烧光"的长上下文
+  if (current.token_usage >= env.runTokenBudget) {
+    throw new AppError(
+      'BUDGET_EXCEEDED',
+      `本次生成已达到 token 上限（${env.runTokenBudget}），已停止以避免继续消耗额度`,
+      '请缩小需求范围，或把需求拆成多轮迭代',
+    )
+  }
 
   await emit(run.id, 'agent.started', {
     agent: role.agent,
@@ -144,6 +152,18 @@ async function callAgent<T>(params: {
         role: role.key,
         chunk: `${role.label} 已产出结构化结果（${res.usage.totalTokens} tokens）`,
       })
+      // 消息历史（F-M2-2）：把每个角色的产出也记进会话，用户才能在刷新后回看"它做了什么"
+      // 角色名写进内容而不是 role 字段：role 只区分 用户/智能体/系统
+      await store()
+        .addMessage({
+          sessionId: current.session_id,
+          role: 'agent',
+          content: `${role.agent}（${role.label}）已完成：${res.usage.totalTokens} tokens · ${res.durationMs}ms`,
+          runId: run.id,
+        })
+        .catch(() => {
+          /* 消息留痕失败不应影响生成主链路 */
+        })
       await emit(run.id, 'agent.finished', {
         agent: role.agent,
         role: role.key,

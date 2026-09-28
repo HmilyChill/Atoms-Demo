@@ -318,11 +318,36 @@
     root.classList.add('atoms-root')
     root.innerHTML = ''
 
+    /**
+     * 报错时要能回答"在哪出错、该怎么办"（F-M6-4 / TST-M6-2）。
+     * 只报一句 message 的话，宿主只能显示"渲染失败了"，用户无从下手。
+     */
+    var ctx = { pageId: '', pageTitle: '', componentId: '', componentType: '' }
+
+    /** 按出错范围给一条可执行建议（不要空话） */
+    function suggest(scope) {
+      if (scope.indexOf('渲染') === 0) return '该组件的结构可能不合法，可让智能体重做这个组件'
+      if (scope.indexOf('加载') === 0) return '数据接口暂时不可用，可点「重新加载」或稍后重试'
+      if (scope === '提交表单') return '请检查必填项后重试；若反复失败，可让智能体修表单校验'
+      if (scope === '数据操作') return '该操作未能写入数据，可刷新页面确认最新状态'
+      return '可让智能体针对这个问题重新生成对应片段'
+    }
+
     function reportError(scope, err) {
       var message = err && err.message ? err.message : String(err)
-      state.errors.push({ scope: scope, message: message, at: new Date().toISOString() })
+      var entry = {
+        scope: scope,
+        message: message,
+        at: new Date().toISOString(),
+        pageId: ctx.pageId,
+        pageTitle: ctx.pageTitle,
+        componentId: ctx.componentId,
+        componentType: ctx.componentType,
+        suggestion: suggest(scope),
+      }
+      state.errors.push(entry)
       try {
-        onError({ scope: scope, message: message })
+        onError(entry)
       } catch (e) {
         /* 上报本身失败也不能让渲染崩掉 */
       }
@@ -687,6 +712,20 @@
                   },
                 }),
               )
+            } else if (a.kind === 'navigate') {
+              // 跳转到另一页（配合 app-runtime 的 pageId 状态；未声明目标页时校验器已拦下）
+              actions.appendChild(
+                el('button', {
+                  class: 'atoms-btn ghost sm',
+                  type: 'button',
+                  text: a.label || '查看',
+                  onclick: function () {
+                    state.pageId = a.targetPageId
+                    notify('navigated', { pageId: a.targetPageId, from: 'row-action' })
+                    paint()
+                  },
+                }),
+              )
             } else if (a.kind === 'toggle') {
               actions.appendChild(
                 el('button', {
@@ -1010,7 +1049,12 @@
 
       var layout = el('div', { class: 'atoms-grid ' + (page.layout === 'dashboard' ? 'cols-2' : '') })
       var byCol = page.layout === 'dashboard'
+      // 记录"当前正在渲染哪个页面的哪个组件"：出错时才能定位（F-M6-4）
+      ctx.pageId = String(page.id || '')
+      ctx.pageTitle = String(page.title || '')
       ;(page.components || []).forEach(function (c) {
+        ctx.componentId = String(c.id || '')
+        ctx.componentType = String(c.type || '')
         try {
           var node = renderComponent(c)
           if (byCol && (c.type === 'stats' || c.type === 'chart')) layout.appendChild(node)
@@ -1019,8 +1063,12 @@
           var box = el('div', { class: 'atoms-errbox' })
           box.appendChild(el('strong', { text: '组件渲染失败：' + c.type }))
           box.appendChild(el('div', { text: err && err.message ? err.message : String(err) }))
+          box.appendChild(el('div', { text: '位置：' + (page.title || page.id) + ' › ' + c.id }))
           body.appendChild(box)
           reportError('渲染 ' + c.type, err)
+        } finally {
+          ctx.componentId = ''
+          ctx.componentType = ''
         }
       })
       if (layout.children.length > 0) body.appendChild(layout)
@@ -1029,7 +1077,9 @@
         var errBox = el('div', { class: 'atoms-errbox' })
         errBox.appendChild(el('strong', { text: '运行时捕获到 ' + state.errors.length + ' 个问题（已如实显示，未隐藏）' }))
         state.errors.slice(-5).forEach(function (e) {
-          errBox.appendChild(el('div', { text: '· ' + e.scope + '：' + e.message }))
+          var where = e.pageTitle ? '（' + e.pageTitle + (e.componentId ? ' › ' + e.componentId : '') + '）' : ''
+          errBox.appendChild(el('div', { text: '· ' + e.scope + where + '：' + e.message }))
+          if (e.suggestion) errBox.appendChild(el('div', { class: 'atoms-hint', text: '  建议：' + e.suggestion }))
         })
         body.appendChild(errBox)
       }

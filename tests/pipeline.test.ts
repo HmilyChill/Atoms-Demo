@@ -97,6 +97,71 @@ test('校验器捕获引用不存在的数据集合', () => {
   assert.ok(res.issues.some((i) => i.message.includes('不存在的数据集合')))
 })
 
+test('校验器捕获动作引用不存在的页面（避免"契约判通过但按钮点了没反应"）', () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  spec.pages[0].components.push({
+    id: 'c-nav',
+    type: 'table',
+    model: 'tasks',
+    columns: [{ field: 'title' }],
+    rowActions: [{ kind: 'navigate', label: '去详情', targetPageId: 'p-not-exist' }],
+  } as never)
+
+  const res = validateSpec(spec)
+  assert.equal(res.ok, false)
+  const issue = res.issues.find((i) => i.path.includes('rowActions[0].targetPageId'))
+  assert.ok(issue, `应指出具体路径，实际：${JSON.stringify(res.issues.map((i) => i.path))}`)
+  assert.ok(issue?.message.includes('不存在的页面'), issue?.message)
+})
+
+test('校验器拒绝运行时未实现的动作类型（超范围必须报错，绝不静默近似）', () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  spec.pages[0].components.push({
+    id: 'c-upd',
+    type: 'table',
+    model: 'tasks',
+    columns: [{ field: 'title' }],
+    rowActions: [{ kind: 'update', label: '编辑' }],
+  } as never)
+
+  const res = validateSpec(spec)
+  assert.equal(res.ok, false)
+  assert.ok(
+    res.issues.some((i) => i.message.includes('不支持的动作类型')),
+    JSON.stringify(res.issues),
+  )
+})
+
+test('校验器要求 status/toggle 动作声明字段（否则运行时无从下手）', () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  spec.pages[0].components.push({
+    id: 'c-status',
+    type: 'table',
+    model: 'tasks',
+    columns: [{ field: 'title' }],
+    rowActions: [{ kind: 'toggle', label: '切换' }],
+  } as never)
+
+  const res = validateSpec(spec)
+  assert.equal(res.ok, false)
+  assert.ok(res.issues.some((i) => i.path.includes('.field') && i.message.includes('必须声明')))
+})
+
+test('校验报告：验收点如实单列（不冒充机检通过，也不冒充"未校验"）', () => {
+  const analysis = analyzeRequirement(S1)
+  const contract = buildContract(analysis)
+  const spec = buildTemplateSpec(analysis, FIXED_TIME)
+  const report = verifySpec(spec, contract)
+
+  assert.ok(contract.acceptance.length > 0, '样例契约应带验收点')
+  assert.deepEqual(report.contract.acceptance, contract.acceptance, '验收点应原样进入报告')
+  // 关键：验收点不能被算进"机检通过"的总数，也不能把整份报告拉成"未校验"
+  assert.equal(report.contract.total, contract.mustDo.length + contract.mustNot.length)
+  assert.equal(report.unverified.length, 0, '验收点不应被当成校验器异常')
+  assert.ok(report.summary.includes('验收点无法机检'), report.summary)
+  assert.equal(report.ok, true, report.summary)
+})
+
 test('自愈：缺失筛选与删除能力时能自动补齐并通过校验', () => {
   const analysis = analyzeRequirement(S1)
   const contract = buildContract(analysis)

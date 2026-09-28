@@ -405,6 +405,7 @@ test('选中元素：显式关闭 selectable 时也不出现该按钮', async ()
 // ─────────── 审批状态流转（IT-2：中等复杂度需求）───────────
 
 const S2 = '做一个活动报名与审批系统：学生提交报名，管理员审批通过或驳回，能看到自己的报名状态。'
+const S3 = '做一个销售记录工具：录入每日销售额与产品，用图表展示汇总趋势。'
 
 test('审批流：审批管理页的「通过」会真实把状态改为已通过（IT-2）', async () => {
   const spec = buildTemplateSpec(analyzeRequirement(S2), FIXED_TIME)
@@ -477,4 +478,70 @@ test('审批流：按审批状态筛选只显示对应记录', async () => {
   const rows = document.querySelectorAll('.atoms-table tbody tr')
   assert.equal(rows.length, 1, '筛选后应只剩 1 条')
   assert.ok(rows[0].textContent?.includes('李四'), '应显示状态匹配的那一条')
+})
+
+test('确定性：同一份 Spec 渲染两次，DOM 结构完全一致（TST-M5-1）', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S2), FIXED_TIME)
+  const seed = { applications: [{ id: 'a1', student: '张三', course: '魔药学', status: '待审批' }] }
+
+  const first = boot(spec, createMemoryAdapter(seed).adapter)
+  await flush()
+  const second = boot(spec, createMemoryAdapter(seed).adapter)
+  await flush()
+
+  // 去掉 jsdom 不会稳定的属性后再比较，避免"测试自身的不确定性"造成假失败
+  const normalize = (html: string) => html.replace(/\s+/g, ' ').trim()
+  assert.equal(
+    normalize(first.root.innerHTML),
+    normalize(second.root.innerHTML),
+    '确定性渲染器对同一 Spec 必须产出同一棵 DOM 树（否则"稳定可校验"就不成立）',
+  )
+})
+
+test('动作：navigate 行内动作可跳到目标页（校验器已确保目标页存在）', async () => {
+  const spec = structuredClone(buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME))
+  const targetPage = spec.pages[1] ?? spec.pages[0]
+  spec.pages[0].components.push({
+    id: 'c-go',
+    type: 'table',
+    model: spec.dataModels[0].name,
+    columns: [{ field: spec.dataModels[0].fields[0].name }],
+    rowActions: [{ kind: 'navigate', label: '去数据看板', targetPageId: targetPage.id }],
+  } as never)
+
+  const model = spec.dataModels[0]
+  const mem = createMemoryAdapter({ [model.name]: [{ id: 'r1', [model.fields[0].name]: '示例' }] })
+  const { document } = boot(spec, mem.adapter)
+  await flush()
+
+  const btn = findButton(document, '去数据看板')
+  assert.ok(btn, '应渲染出 navigate 动作按钮')
+  btn.click()
+  await flush()
+
+  assert.ok(
+    document.body.textContent?.includes(targetPage.title),
+    `点击后应切到目标页「${targetPage.title}」`,
+  )
+})
+
+test('运行时错误：回传宿主时带上页面/组件位置与建议（F-M6-4）', async () => {
+  // 场景：库里存着一份"含未知组件"的 Spec（例如旧版本或被人改过）——
+  // 运行时必须**明确报错并指出位置**，而不是白屏或静默跳过。
+  const spec = structuredClone(buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME))
+  spec.pages[0].components.push({ id: 'c-unknown-x', type: 'threejs-canvas' } as never)
+
+  const mem = createMemoryAdapter({ [spec.dataModels[0].name]: [] })
+  const { errors, document } = boot(spec, mem.adapter)
+  await flush()
+
+  const withLocation = errors.find((e) => (e as { componentId?: string }).componentId)
+  assert.ok(withLocation, `错误应带组件定位，实际：${JSON.stringify(errors)}`)
+  assert.equal((withLocation as { componentId?: string }).componentId, 'c-unknown-x', '应指出是哪个组件')
+  assert.ok((withLocation as { pageTitle?: string }).pageTitle, '应指出是哪个页面')
+  assert.ok((withLocation as { suggestion?: string }).suggestion, '应给出可执行建议')
+
+  // 而且界面上必须看得见这个错误（绝不静默白屏）
+  assert.ok(document.querySelector('.atoms-errbox'), '应渲染出错误框')
+  assert.ok(document.body.textContent?.includes('不支持的组件'), '错误框应说明原因')
 })

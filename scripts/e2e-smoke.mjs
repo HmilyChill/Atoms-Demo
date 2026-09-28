@@ -96,6 +96,20 @@ const main = async () => {
   const me0 = await api('/api/auth/me')
   check('未登录时返回 user=null', me0.body?.data?.user === null)
   check('暴露 provider 信息（演示模式标记）', typeof me0.body?.data?.provider?.kind === 'string')
+  check(
+    'provider 信息含"是否降级"与说明（F-M11-4：额度耗尽时界面必须说实话）',
+    typeof me0.body?.data?.provider?.degraded === 'boolean' &&
+      typeof me0.body?.data?.provider?.note === 'string' &&
+      me0.body.data.provider.note.length > 0,
+    JSON.stringify(me0.body?.data?.provider),
+  )
+  const health = await api('/api/health')
+  check('健康检查可访问且带配额快照', health.status === 200 && typeof health.body?.data?.quota?.dailyCallLimit === 'number')
+  check(
+    '健康检查里的 provider 与实际一致（未配置 key 时为 mock）',
+    health.body?.data?.provider?.kind === 'mock' && health.body?.data?.provider?.degraded === false,
+    JSON.stringify(health.body?.data?.provider),
+  )
 
   const demo = await api('/api/auth/demo', { method: 'POST' })
   check('一键体验可创建演示账号', demo.status === 200 && !!demo.body?.data?.id, `status=${demo.status}`)
@@ -282,6 +296,19 @@ const main = async () => {
   const previewHtml = await preview.text()
   check('预览页可访问（无需 Cookie）', preview.status === 200, `status=${preview.status}`)
   check('预览页注入了 App Spec', previewHtml.includes('AtomsRuntime') || previewHtml.includes('meta'))
+  // 不能只断言"200 + 提到 renderApp"：要证明**这份 Spec 真的被塞进页面**了（TST-M6-1）
+  check(
+    '预览页内嵌了该项目的真实 Spec（页面标题出现在 HTML 里）',
+    previewHtml.includes('任务') || previewHtml.includes('待办'),
+    previewHtml.slice(0, 200),
+  )
+  check('预览页带只读/读写模式标记', previewHtml.includes('readOnly') || previewHtml.includes('selectable'))
+
+  // 无效 / 被篡改的令牌必须 404（TST-M13-2），不能是"200 + 友好错误页"
+  const badPreview = await fetch(`${BASE}/preview/${projectId}?pt=${encodeURIComponent('tampered.token.value')}`)
+  check('被篡改的预览令牌返回 404（不泄露资源是否存在）', badPreview.status === 404, `status=${badPreview.status}`)
+  const noTokenPreview = await fetch(`${BASE}/preview/${projectId}`)
+  check('不带令牌访问项目预览返回 404（鉴权失败不返回 200 伪装页）', noTokenPreview.status === 404, `status=${noTokenPreview.status}`)
 
   const runtimeJs = await fetch(`${BASE}/app-runtime.js`)
   const runtimeSrc = await runtimeJs.text()
@@ -485,6 +512,90 @@ const main = async () => {
     )
     await api(`/api/runs/${recoverId}/cancel`, { method: 'POST' })
   }
+
+  section('8.3 图表/看板类需求（IT-3：另一类模板，防止"只有待办能跑"）')
+  const dashReq = '做一个销售记录工具：录入每日销售额与产品，用图表展示汇总趋势。'
+  const dashProj = await api('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'E2E 销售看板', description: dashReq }),
+  })
+  const dashProjectId = dashProj.body?.data?.project?.id
+  check('可创建看板类项目', dashProj.status === 200 && !!dashProjectId, `status=${dashProj.status}`)
+  if (dashProjectId) {
+    const dashRun = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: dashProjectId, userInput: dashReq }),
+    })
+    const dashRunId = dashRun.body?.data?.runId
+    check('看板类需求可发起生成', dashRun.status === 201 && !!dashRunId, `status=${dashRun.status}`)
+    if (dashRunId) {
+      // 新 Run 同样要过人工确认 Gate：先推到 Gate，确认，再继续
+      await api(`/api/runs/${dashRunId}/step`, { method: 'POST' })
+      const dashGate = await api(`/api/runs/${dashRunId}/step`, { method: 'POST' })
+      check(
+        '看板类需求同样停在 Gate 等人工确认',
+        dashGate.body?.data?.run?.stage === 'awaiting_confirm',
+        JSON.stringify(dashGate.body?.data?.run?.stage),
+      )
+      await api(`/api/runs/${dashRunId}/confirm`, { method: 'POST' })
+
+      const dashDriven = await driveRun(dashRunId)
+      check('看板类需求可完整生成完成（不是只有待办模板能跑）', dashDriven.ok, dashDriven.error ?? '')
+
+      const dashSnap = await api(`/api/runs/${dashRunId}`)
+      const dashArtifacts = dashSnap.body?.data?.artifacts ?? []
+      const dashVerify = dashArtifacts.filter((a) => a.type === 'verification').pop()?.payload
+      check('看板类需求的校验报告如实通过', dashVerify?.ok === true, dashVerify?.summary ?? '')
+
+      const dashSpecRes = await api(`/api/projects/${dashProjectId}/spec`)
+      const dashSpec = dashSpecRes.body?.data?.spec
+      const dashComps = (dashSpec?.pages ?? []).flatMap((p) => p.components ?? [])
+      const dashTypes = [...new Set(dashComps.map((c) => c.type))]
+      check('看板包含图表组件（M5 图表能力）', dashTypes.includes('chart'), `实际组件：${dashTypes.join('、')}`)
+      check('看板包含统计卡片', dashTypes.includes('stats'), `实际组件：${dashTypes.join('、')}`)
+
+      const chart = dashComps.find((c) => c.type === 'chart')
+      check(
+        '图表声明了数据来源、分组字段与聚合方式（否则渲染冒烟会拦）',
+        !!chart?.model && !!chart?.xField && !!chart?.aggregate,
+        JSON.stringify({ model: chart?.model, xField: chart?.xField, aggregate: chart?.aggregate }),
+      )
+      const modelNames = (dashSpec?.dataModels ?? []).map((m) => m.name)
+      check(
+        '图表的 model 指向已声明的数据集合（数据来自持久层，不是前端造数）',
+        modelNames.includes(chart?.model),
+        `model=${chart?.model} 已声明=${modelNames.join('、')}`,
+      )
+
+      const collection = modelNames[0]
+      if (collection) {
+        const dashRec = await api(`/api/projects/${dashProjectId}/records/${collection}`, {
+          method: 'POST',
+          body: JSON.stringify({ record: { note: 'E2E 看板数据' } }),
+        })
+        check('可往看板的数据集合写入记录', dashRec.status === 201, `status=${dashRec.status}`)
+        const dashRead = await api(`/api/projects/${dashProjectId}/records/${collection}`)
+        check('看板数据来自持久层（跨请求可读回）', (dashRead.body?.data?.records ?? []).length >= 1)
+      } else {
+        check('看板的数据集合可识别（用于写入验证）', false, '未解析出数据集合名，写入验证被跳过')
+      }
+    }
+    await api(`/api/projects/${dashProjectId}`, { method: 'DELETE' })
+  }
+
+  section('8.4 会话消息历史（F-M2-2）')
+  const msgs = await api(`/api/projects/${projectId}/messages`)
+  const msgList = msgs.body?.data?.messages ?? []
+  check('可读取会话消息历史', msgs.status === 200 && Array.isArray(msgList), `status=${msgs.status}`)
+  check('消息历史包含用户的需求描述', msgList.some((m) => m.role === 'user' && String(m.content).includes('待办')), JSON.stringify(msgList))
+  check(
+    '消息历史包含各智能体的产出记录（否则刷新后看不出"它做了什么"）',
+    msgList.some((m) => m.role === 'agent'),
+    JSON.stringify(msgList.map((m) => m.role)),
+  )
+  check('消息都带时间戳', msgList.every((m) => typeof m.createdAt === 'string' && m.createdAt.length > 0))
+  const crossMsgs = await api(`/api/projects/${projectId}/messages`, {}, 'atoms_session=forged')
+  check('伪造会话读取消息被拒（401）', crossMsgs.status === 401, `status=${crossMsgs.status}`)
 
   section('9.2 安全响应头（M11 F-M11-7）')
   const headRes = await fetch(`${BASE}/`)

@@ -4,18 +4,18 @@ import { getStore } from '@/lib/db/store'
 import { AppError } from '@/lib/errors'
 import { env } from '@/lib/env'
 import { ok, readJson, route, clientKey } from '@/lib/api/http'
-import { checkRateLimit } from '@/lib/quota/guard'
+import { checkGenerateRateLimit } from '@/lib/quota/guard'
 import { createRun } from '@/lib/agents/orchestrator'
 
 export async function POST(req: NextRequest): Promise<Response> {
   return route(async () => {
     const user = await requireUser()
-    const limit = checkRateLimit(`runs:${clientKey(req, user.id)}`)
+    const limit = checkGenerateRateLimit(clientKey(req, user.id))
     if (!limit.ok) {
       throw new AppError(
         'RATE_LIMITED',
         '生成请求过于频繁，已为您限流',
-        `请在 ${limit.retryAfterSec ?? 60} 秒后重试（演示额度有限，感谢理解）`,
+        `请在 ${limit.retryAfterSec ?? 60} 秒后重试。演示额度有限：也可等待额度恢复（每日自动重置）`,
       )
     }
 

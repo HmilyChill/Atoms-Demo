@@ -103,6 +103,181 @@ test('调用预算：超过单 Run 上限即中止，并如实报错（不会悄
   }
 })
 
+test('provider 失败：可重试错误会重试，且时间线里 started/finished 仍然配对（TST-M4-2）', async () => {
+  const { store, project, session } = await seed('retry')
+  const { resetLlmProvider } = await import('@/lib/llm')
+  const { LlmError } = await import('@/lib/llm/types')
+  const real = (await import('@/lib/llm/templates')).buildPlan
+
+  let calls = 0
+  let attemptsSeen = 0
+  // 注入一个"第 1 次必然失败、第 2 次成功"的假 provider（Mock 恒成功，测不到重试链路）
+  const g = globalThis as unknown as { __atomsProvider?: unknown }
+  const fake = {
+    kind: 'mock',
+    async complete<T>(req: { input: string }): Promise<{
+      data: T
+      usage: { totalTokens: number }
+      durationMs: number
+      provider: 'mock'
+    }> {
+      calls += 1
+      if (calls === 1) throw new LlmError('timeout', '模拟超时')
+      const analysis = (await import('@/lib/llm/templates')).analyzeRequirement(req.input)
+      return { data: real(analysis) as unknown as T, usage: { totalTokens: 10 }, durationMs: 1, provider: 'mock' }
+    },
+  }
+  g.__atomsProvider = fake
+  try {
+    const run = await createRun({
+      projectId: project.id,
+      sessionId: session.id,
+      userInput: TODO,
+      mode: 'create',
+      requireConfirm: false,
+    })
+    const first = await advanceRun(run.id)
+    assert.equal(first.run.status, 'running', '重试成功后应继续推进')
+    assert.equal(calls, 2, '第一次失败后应重试一次（而不是直接失败）')
+
+    const events = await allEvents(run.id)
+    attemptsSeen = events.filter((e) => e.type === 'agent.started').length
+    const finished = events.filter((e) => e.type === 'agent.finished').length
+    assert.equal(attemptsSeen, finished, 'agent.started / finished 必须配对（不留永远转圈的卡片）')
+    assert.ok(
+      events.some((e) => e.type === 'agent.delta' && String(e.payload?.chunk ?? '').includes('正在重试')),
+      '重试过程应对用户可见',
+    )
+  } finally {
+    g.__atomsProvider = undefined
+    resetLlmProvider()
+  }
+})
+
+test('provider 持续失败：用尽重试后如实失败，并给出可读原因（TST-M4-2）', async () => {
+  const { project, session } = await seed('retry-fail')
+  const { resetLlmProvider } = await import('@/lib/llm')
+  const { LlmError } = await import('@/lib/llm/types')
+
+  const g = globalThis as unknown as { __atomsProvider?: unknown }
+  g.__atomsProvider = {
+    kind: 'mock',
+    async complete(): Promise<never> {
+      throw new LlmError('network', '模拟服务不可用')
+    },
+  }
+  try {
+    const run = await createRun({
+      projectId: project.id,
+      sessionId: session.id,
+      userInput: TODO,
+      mode: 'create',
+      requireConfirm: false,
+    })
+    const result = await advanceRun(run.id)
+    assert.equal(result.done, true, '重试用尽后应结束（不能无限重试）')
+    assert.equal(result.run.status, 'failed')
+    assert.match(String(result.run.error_message ?? ''), /模拟服务不可用|不可用/, '错误信息应保留真实原因')
+
+    const events = await allEvents(run.id)
+    assert.ok(events.some((e) => e.type === 'run.failed'), '应留下 run.failed 事件')
+  } finally {
+    g.__atomsProvider = undefined
+    resetLlmProvider()
+  }
+})
+
+test('token 预算：用量达到上限即中止（只限次数挡不住烧额度）（F-M11-3）', async () => {
+  const previous = process.env.RUN_TOKEN_BUDGET
+  const { store, project, session } = await seed('token-budget')
+  const run = await createRun({
+    projectId: project.id,
+    sessionId: session.id,
+    userInput: TODO,
+    mode: 'create',
+    requireConfirm: false,
+  })
+  await advanceRun(run.id) // 正常产出计划，并获得一些 token 用量
+  const used = (await store.getRun(run.id))?.token_usage ?? 0
+
+  // 把上限压到"已经用掉"的水平，下一次调用必须被拦住
+  process.env.RUN_TOKEN_BUDGET = String(Math.max(1, used))
+  try {
+    const next = await advanceRun(run.id)
+    assert.equal(next.done, true, '达到 token 上限应中止')
+    assert.equal(next.run.status, 'failed')
+    assert.match(String(next.run.error_message ?? ''), /token 上限/, '错误信息应说明是 token 上限')
+  } finally {
+    if (previous === undefined) delete process.env.RUN_TOKEN_BUDGET
+    else process.env.RUN_TOKEN_BUDGET = previous
+  }
+})
+
+test('自愈：最多 2 轮，仍修不好则如实收敛为部分通过（TST-M8-2）', async () => {
+  const { store, project, session } = await seed('repair-limit')
+  const { resetLlmProvider } = await import('@/lib/llm')
+  const { MockProvider } = await import('@/lib/llm/mock')
+
+  // 注入"在 spec 阶段悄悄塞进一个图表组件"的 provider：
+  // 待办类需求的契约里「不引入图表看板」是禁做项 → 校验必然失败，且修复无法把它变通过。
+  const g = globalThis as unknown as { __atomsProvider?: unknown }
+  const inner = new MockProvider()
+  g.__atomsProvider = {
+    kind: 'mock',
+    async complete(req: { expects: string } & Record<string, unknown>) {
+      const res = (await (inner as unknown as { complete: (r: unknown) => Promise<unknown> }).complete(req)) as {
+        data: { pages?: Array<{ components: Array<Record<string, unknown>> }>; dataModels?: Array<{ name: string }> }
+      }
+      if (req.expects === 'spec' && res?.data?.pages?.[0]) {
+        res.data.pages[0].components.push({
+          id: 'c-forbidden-chart',
+          type: 'chart',
+          model: res.data.dataModels?.[0]?.name ?? 'tasks',
+          chart: 'bar',
+          xField: 'title',
+          yField: 'title',
+          aggregate: 'count',
+        })
+      }
+      return res
+    },
+  }
+
+  try {
+    const run = await createRun({
+      projectId: project.id,
+      sessionId: session.id,
+      userInput: TODO,
+      mode: 'create',
+      requireConfirm: false,
+    })
+    const result = await driveToEnd(run.id)
+    assert.equal(result?.done, true, '应收敛，而不是无限修复')
+
+    const events = await allEvents(run.id)
+    const repairAttempts = events.filter((e) => e.type === 'repair.attempt').length
+    assert.ok(repairAttempts <= 2, `修复轮次不得超过 2（实际 ${repairAttempts}）`)
+    assert.ok(repairAttempts >= 1, '这个用例必须真的触发过修复，否则测不到上限')
+
+    const verification = (await store.listArtifactsByRun(run.id)).filter((a) => a.type === 'verification').pop()
+    const report = verification ? JSON.parse(verification.payload) : null
+    assert.equal(report?.ok, false, '修不好就必须如实报"未通过"，绝不谎报')
+
+    // 终态必须明确说明"部分通过"，而不是假装完全成功
+    const lastVerify = events.filter((e) => e.type === 'verify.result').pop()
+    assert.equal(lastVerify?.payload?.ok, false, '最后一次校验结果必须是"未通过"')
+    assert.ok(
+      events.some(
+        (e) => e.type === 'agent.delta' && String(e.payload?.chunk ?? '').includes('已达到自动修复上限'),
+      ),
+      '应明确告知用户"已到修复上限、仍有未通过项"',
+    )
+  } finally {
+    g.__atomsProvider = undefined
+    resetLlmProvider()
+  }
+})
+
 test('取消生成：状态置为 cancelled，留下事件，且已产出产物保留', async () => {
   const { store, project, session } = await seed('cancel')
   const run = await createRun({

@@ -16,6 +16,9 @@ export interface ProviderInfoDto {
   model: string
   demoMode: boolean
   hasKey: boolean
+  /** 因当日额度熔断而被迫降级（F-M11-4）：界面必须如实标注 */
+  degraded?: boolean
+  note?: string
 }
 
 interface MeResponse {
@@ -33,6 +36,17 @@ const SAMPLES: Array<{ label: string; req: string }> = [
   { label: '会议室预约', req: '做一个会议室预约系统：提交预约，管理员确认或取消，按资源筛选。' },
 ]
 
+/** 把 ISO 时间显示成"多久之前 + 本地时间"，便于一眼看出哪个项目最近动过（F-M1-4） */
+function formatTime(iso: string): string {
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return '未知'
+  const diffMs = Date.now() - t.getTime()
+  const min = Math.floor(diffMs / 60_000)
+  const rel =
+    min < 1 ? '刚刚' : min < 60 ? `${min} 分钟前` : min < 60 * 24 ? `${Math.floor(min / 60)} 小时前` : `${Math.floor(min / 1440)} 天前`
+  return `${rel}（${t.toLocaleString('zh-CN', { hour12: false })}）`
+}
+
 export default function HomePage() {
   const router = useRouter()
   const [me, setMe] = useState<MeResponse | null>(null)
@@ -40,6 +54,8 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  /** 待二次确认删除的项目（删除会级联清掉产物与应用数据，不可撤销） */
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -102,8 +118,13 @@ export default function HomePage() {
   async function removeProject(id: string) {
     setBusy(id)
     try {
-      await fetch(`/api/projects/${id}`, { method: 'DELETE' })
+      const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error?.message ?? '删除失败')
+      setPendingDelete(null)
       await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
     } finally {
       setBusy('')
     }
@@ -128,17 +149,24 @@ export default function HomePage() {
           {provider && (
             <span
               className={
-                provider.demoMode
-                  ? 'rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800'
-                  : 'rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800'
+                provider.degraded
+                  ? 'rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-xs text-rose-800'
+                  : provider.demoMode
+                    ? 'rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-800'
+                    : 'rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800'
               }
               title={
-                provider.demoMode
+                provider.note ??
+                (provider.demoMode
                   ? '当前使用确定性 Mock provider：无需 API Key 即可完整演示，结果可复现'
-                  : `真实模型：${provider.model}`
+                  : `真实模型：${provider.model}`)
               }
             >
-              {provider.demoMode ? '演示模式（Mock provider）' : `真实模型 · ${provider.model}`}
+              {provider.degraded
+                ? '演示模式（额度已耗尽，已自动降级）'
+                : provider.demoMode
+                  ? '演示模式（Mock provider）'
+                  : `真实模型 · ${provider.model}`}
             </span>
           )}
           <div className="ml-auto flex items-center gap-3 text-sm">
@@ -262,18 +290,42 @@ export default function HomePage() {
                       <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-500">
                         {p.description || '（暂无描述）'}
                       </p>
-                      <div className="mt-3 flex items-center gap-3 text-xs">
-                        <a href={`/projects/${p.id}`} className="text-indigo-600 hover:underline">
-                          打开工作台
-                        </a>
-                        <button
-                          onClick={() => removeProject(p.id)}
-                          disabled={busy === p.id}
-                          className="text-slate-400 hover:text-red-600 disabled:opacity-50"
-                        >
-                          删除
-                        </button>
+                      <div className="mt-1 text-[11px] text-slate-400">
+                        最近更新：{formatTime(p.updatedAt)}
                       </div>
+                      {pendingDelete === p.id ? (
+                        <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-800">
+                          <span>删除后项目、产物与应用数据都会被清掉，且不可恢复。</span>
+                          <div className="ml-auto flex gap-2">
+                            <button
+                              onClick={() => void removeProject(p.id)}
+                              disabled={busy === p.id}
+                              className="rounded border border-red-300 bg-white px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-100 disabled:opacity-50"
+                            >
+                              确认删除
+                            </button>
+                            <button
+                              onClick={() => setPendingDelete(null)}
+                              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-3 flex items-center gap-3 text-xs">
+                          <a href={`/projects/${p.id}`} className="text-indigo-600 hover:underline">
+                            打开工作台
+                          </a>
+                          <button
+                            onClick={() => setPendingDelete(p.id)}
+                            disabled={busy === p.id}
+                            className="text-slate-400 hover:text-red-600 disabled:opacity-50"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

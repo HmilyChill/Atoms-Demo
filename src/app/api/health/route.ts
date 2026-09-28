@@ -21,6 +21,9 @@ export async function GET(): Promise<Response> {
         model: provider.model,
         demoMode: provider.demoMode,
         hasKey: provider.hasKey,
+        // F-M11-4：额度熔断后必须如实标注"已降级"，否则界面会说"正在用真实模型"而实际在跑 Mock
+        degraded: provider.degraded,
+        note: provider.note,
       },
       quota: quotaSnapshot(),
       runtime: {

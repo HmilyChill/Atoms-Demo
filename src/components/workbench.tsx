@@ -70,7 +70,13 @@ interface VerificationDto {
   ok?: boolean
   summary?: string
   render?: { errors?: string[]; pagesChecked?: number; componentsChecked?: number }
-  contract?: { total?: number; passed?: Array<{ id: string; text: string }>; failed?: Array<{ id: string; text: string; reason?: string }> }
+  contract?: {
+    total?: number
+    passed?: Array<{ id: string; text: string }>
+    failed?: Array<{ id: string; text: string; reason?: string }>
+    /** 验收点：人类可读、无法机检（F-M8-3），单独展示 */
+    acceptance?: string[]
+  }
   unverified?: string[]
 }
 
@@ -137,7 +143,16 @@ type TabKey = (typeof TABS)[number]['key']
 
 // ─────────────────────────── 组件 ───────────────────────────
 
-export function Workbench({ projectId, projectName }: { projectId: string; projectName: string }) {
+export function Workbench({
+  projectId,
+  projectName,
+  maxInputLength = 4000,
+}: {
+  projectId: string
+  projectName: string
+  /** 与服务端 MAX_INPUT_LENGTH 一致，用于输入时就地提示（F-M2-1） */
+  maxInputLength?: number
+}) {
   const [input, setInput] = useState('')
   const [autoConfirm, setAutoConfirm] = useState(false)
   const [run, setRun] = useState<RunSnapshot | null>(null)
@@ -157,6 +172,8 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [shareUrl, setShareUrl] = useState('')
+  /** 会话消息历史（F-M2-2）：让"刷新后还能看到刚才聊了什么"真正成立 */
+  const [messages, setMessages] = useState<Array<{ id: string; role: string; content: string; createdAt: string }>>([])
   const [previewError, setPreviewError] = useState('')
   /** 用户从预览里点选的元素（用于生成一条"针对该元素"的修改诉求） */
   const [selectedElement, setSelectedElement] = useState<{
@@ -200,10 +217,18 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
     setPreviewKey((k) => k + 1)
   }, [projectId])
 
+  const loadMessages = useCallback(async () => {
+    const res = await fetch(`/api/projects/${projectId}/messages`, { cache: 'no-store' })
+    if (!res.ok) return
+    const json = await res.json()
+    setMessages((json.data.messages ?? []) as Array<{ id: string; role: string; content: string; createdAt: string }>)
+  }, [projectId])
+
   useEffect(() => {
     void loadSpec()
     void loadPreviewToken()
-  }, [loadSpec, loadPreviewToken])
+    void loadMessages()
+  }, [loadSpec, loadPreviewToken, loadMessages])
 
   // 预览 iframe 内运行时的上报：错误必须可见（不能静默白屏）；元素选中用于定向修改
   useEffect(() => {
@@ -216,8 +241,21 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
       if (data?.source !== 'atoms-preview' && data?.source !== 'atoms-preview-host') return
 
       if (data.type === 'error' && data.payload) {
-        const p = data.payload as { scope?: string; message?: string }
-        setPreviewError(`${p.scope ?? '预览'}：${p.message ?? ''}`)
+        const p = data.payload as {
+          scope?: string
+          message?: string
+          pageTitle?: string
+          componentId?: string
+          componentType?: string
+          suggestion?: string
+        }
+        // 带上"位置 + 建议"：只说"渲染失败"用户无从下手（F-M6-4）
+        const where =
+          p.pageTitle || p.componentId
+            ? `（位置：${p.pageTitle ?? '未知页面'}${p.componentId ? ` › ${p.componentId}` : ''}${p.componentType ? ` · ${p.componentType}` : ''}）`
+            : ''
+        const advice = p.suggestion ? `　建议：${p.suggestion}` : ''
+        setPreviewError(`${p.scope ?? '预览'}：${p.message ?? ''}${where}${advice}`)
       }
 
       if (data.type === 'element-selected' && data.payload) {
@@ -243,9 +281,9 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
 
   const afterRun = useCallback(
     async (runId: string) => {
-      await Promise.all([loadSpec(), loadArtifacts(runId), loadPreviewToken()])
+      await Promise.all([loadSpec(), loadArtifacts(runId), loadPreviewToken(), loadMessages()])
     },
-    [loadSpec, loadArtifacts, loadPreviewToken],
+    [loadSpec, loadArtifacts, loadPreviewToken, loadMessages],
   )
 
   /** 驱动循环：每次请求只推进一步（规避函数超时）；带硬性步数上限，避免死循环 */
@@ -322,6 +360,10 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
         setError('请先描述你想要的应用')
         return
       }
+      if (text.length > maxInputLength) {
+        setError(`需求描述过长（${text.length} / ${maxInputLength} 字），请精简或分多轮迭代补充`)
+        return
+      }
       setError('')
       setNotice('')
       setEvents([])
@@ -358,7 +400,7 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
         setBusy(false)
       }
     },
-    [projectId, autoConfirm, subscribe, drive],
+    [projectId, autoConfirm, subscribe, drive, maxInputLength],
   )
 
   // ?req=...&autostart=1 —— 支持"一键试用"直达生成
@@ -375,6 +417,47 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
       }
     }
   }, [startRun])
+
+  /**
+   * 刷新页面后恢复"进行中的生成"（F-M2-6 / TST-M2-4 / IT-6）。
+   *
+   * 为什么必须做：服务端的 Run 不受浏览器刷新影响，会一直停在原来的阶段。
+   * 如果前端刷新后什么都不拉，用户看到的是"空白时间线 + 一个僵尸任务"，
+   * 再点一次生成还会被拒（同一会话已有进行中的任务）。
+   */
+  useEffect(() => {
+    if (autoStartedRef.current) return
+    let alive = true
+    void (async () => {
+      try {
+        const res = await fetch(`/api/projects/${projectId}`, { cache: 'no-store' })
+        if (!res.ok) return
+        const json = await res.json()
+        const runs = (json?.data?.runs ?? []) as RunSnapshot[]
+        const active = runs.find((r) => ['pending', 'running', 'awaiting_confirm'].includes(String(r.status)))
+        if (!active?.id || !alive) return
+
+        const snap = await fetch(`/api/runs/${active.id}`, { cache: 'no-store' }).then((r) => r.json())
+        if (!alive) return
+        const seed = (snap?.data?.events ?? []) as RunEventDto[]
+        setRun((snap?.data?.run as RunSnapshot) ?? active)
+        setEvents(seed)
+        setArtifacts((snap?.data?.artifacts ?? []) as ArtifactDto[])
+        subscribe(active.id, seed.length > 0 ? seed[seed.length - 1].eventId : 0)
+        setNotice(
+          active.status === 'awaiting_confirm'
+            ? '已恢复上次未确认的生成任务：确认计划与契约后会继续生成'
+            : '已恢复上次未完成的生成任务，正在继续推进',
+        )
+        if (active.status !== 'awaiting_confirm') await drive(active.id)
+      } catch {
+        /* 恢复失败不阻塞使用：用户仍可重新提交（服务端会给出明确提示） */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [projectId, subscribe, drive])
 
   const confirmRun = useCallback(async () => {
     if (!run) return
@@ -394,8 +477,20 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
 
   const cancelRun = useCallback(async () => {
     if (!run) return
-    await fetch(`/api/runs/${run.id}/cancel`, { method: 'POST' })
-    setNotice('已取消本次生成。已产出的产物已保留，可继续查看。')
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/runs/${run.id}/cancel`, { method: 'POST' })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(String(json?.error?.message ?? '取消失败'))
+      // 必须立刻更新本地状态：否则按钮会一直停在"生成中…"，用户以为没生效而反复点
+      const snapshot = json?.data?.run as RunSnapshot | undefined
+      setRun((prev) => snapshot ?? (prev ? { ...prev, status: 'cancelled' } : prev))
+      setNotice('已取消本次生成。已产出的产物已保留，可继续查看。')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '取消失败')
+    } finally {
+      setBusy(false)
+    }
   }, [run])
 
   const rollback = useCallback(
@@ -657,6 +752,14 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
               placeholder="例如：做一个个人待办清单，能新增任务、标记完成、按状态筛选、删除"
               className="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm"
             />
+            <div className="mt-1 flex items-center justify-between text-[11px]">
+              <span className={input.length > maxInputLength ? 'text-red-600' : 'text-slate-400'}>
+                {input.length > maxInputLength
+                  ? `超出上限 ${input.length - maxInputLength} 字，服务端会拒绝`
+                  : `已输入 ${input.length} 字`}
+              </span>
+              <span className="text-slate-400">上限 {maxInputLength} 字</span>
+            </div>
             <div className="mt-2 flex flex-wrap gap-2">
               {[
                 '做一个个人待办清单：能新增任务、标记完成、按状态筛选、删除。',
@@ -679,7 +782,7 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
             <div className="mt-3 flex gap-2">
               <button
                 onClick={() => void startRun(input)}
-                disabled={running}
+                disabled={running || input.trim().length > maxInputLength}
                 className="flex-1 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
               >
                 {running ? '生成中…' : spec ? '提交迭代' : '开始生成'}
@@ -769,6 +872,40 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
                 生成失败：{derived.failure}
               </div>
             )}
+
+            {/* 会话消息历史（F-M2-2）：刷新后仍能回看"我说了什么、它做了什么" */}
+            <div className="mt-4">
+              <div className="mb-2 flex items-center justify-between text-xs font-medium text-slate-600">
+                <span>会话记录</span>
+                <span className="text-slate-400">{messages.length} 条</span>
+              </div>
+              {messages.length === 0 ? (
+                <div className="rounded-md border border-dashed border-slate-300 p-4 text-center text-[11px] text-slate-400">
+                  提交需求后，这里会留下你与各智能体的往来记录
+                </div>
+              ) : (
+                <ul className="space-y-1.5">
+                  {messages.slice(-30).map((m) => (
+                    <li
+                      key={m.id}
+                      className={
+                        m.role === 'user'
+                          ? 'rounded-md border border-indigo-200 bg-indigo-50 p-2 text-[11px] text-indigo-900'
+                          : 'rounded-md border border-slate-200 bg-white p-2 text-[11px] text-slate-700'
+                      }
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{m.role === 'user' ? '我' : '智能体'}</span>
+                        <span className="ml-auto text-[10px] text-slate-400">
+                          {new Date(m.createdAt).toLocaleTimeString('zh-CN', { hour12: false })}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 break-words">{m.content}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         </section>
 
@@ -1106,6 +1243,21 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
                             </li>
                           ))}
                         </ul>
+                      </div>
+                    )}
+                    {(report.contract?.acceptance ?? []).length > 0 && (
+                      <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900">
+                        <div className="font-medium">
+                          验收点（{(report.contract?.acceptance ?? []).length} 条，无法机检、需人工确认）
+                        </div>
+                        <ul className="mt-1 list-inside list-disc">
+                          {(report.contract?.acceptance ?? []).map((a, i) => (
+                            <li key={i}>{a}</li>
+                          ))}
+                        </ul>
+                        <div className="mt-1 text-[11px] text-amber-700">
+                          这些是人类可读的验收标准，不会被伪装成"已通过机检"，请按需人工确认。
+                        </div>
                       </div>
                     )}
                     {(report.unverified ?? []).length > 0 && (

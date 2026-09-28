@@ -79,6 +79,21 @@ export const env = {
   get rateLimitPerMinute(): number {
     return int('RATE_LIMIT_PER_MINUTE', 20)
   },
+  /**
+   * 生成类请求的每分钟上限（F-M11-2）：
+   * 比普通读写更严格，因为一次生成会连带多次模型调用与落库。
+   * 默认 10（普通接口 20）：既能挡住脚本刷额度，也不至于让正常用户"点几次就被拒"。
+   */
+  get rateLimitGeneratePerMinute(): number {
+    return int('RATE_LIMIT_GENERATE_PER_MINUTE', 10)
+  },
+  /**
+   * 单次 Run 的 token 上限（F-M11-3）：
+   * 只限调用次数是不够的 —— 长上下文可以"次数没超、额度先烧光"。
+   */
+  get runTokenBudget(): number {
+    return int('RUN_TOKEN_BUDGET', 60_000)
+  },
   /** 单次 Run 允许的最大输入长度 */
   get maxInputLength(): number {
     return int('MAX_INPUT_LENGTH', 4000)
