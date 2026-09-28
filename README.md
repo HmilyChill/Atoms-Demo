@@ -63,9 +63,18 @@ pnpm dev          # 开发服务器
 pnpm build        # 生产构建
 pnpm start        # 启动生产服务
 pnpm typecheck    # TypeScript 类型检查（tsc --noEmit）
-pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离）
+pnpm test         # 单元测试（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时交互）
 pnpm smoke        # 端到端冒烟测试（需先启动服务，见下）
+pnpm smoke:provider   # 真实模型连通性与结构化输出验证（需 DEEPSEEK_API_KEY）
+pnpm push:github      # 用 GitHub API 推送仓库（保留完整提交历史与 tag；先跑 --dry-run）
+pnpm deploy:check <部署地址>   # 对已部署地址跑 21 项部署自检
 ```
+
+> **受限沙箱下的说明**：若你的执行环境禁止 `child_process` 的管道 stdio（表现为 `spawn EPERM`），
+> `pnpm dev` 会启动失败——因为 Next 开发 CLI 会 `fork()` 子进程启动服务器。
+> 此时请改用 `pnpm build && pnpm start` 进行本地验证（已在本项目验证可用）。
+> 这是环境限制，正常机器与 Vercel 上 `pnpm dev` 不受影响。
+> 同理，`pnpm test` 已固定使用 `--test-isolation=none` 以避免派生测试子进程。
 
 端到端冒烟测试（覆盖 70 项断言：生成、契约、预览、数据持久化、迭代、回滚、导出、越权）：
 
@@ -149,6 +158,13 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
 目标平台：**Vercel**（Git 直连）。
 
 1. 把本仓库推到 GitHub（public）
+   - 正常环境：`git remote add origin <url> && git push -u origin main --tags`
+   - 若 `git` 走 HTTPS 不可用（部分受限环境会报 `schannel: SEC_E_NO_CREDENTIALS`）：
+     用本仓库自带的 API 推送脚本，**完整保留提交历史与 tag**
+     ```bash
+     pnpm push:github --dry-run          # 先本地演练，不联网
+     GITHUB_TOKEN=ghp_xxx pnpm push:github
+     ```
 2. Vercel → New Project → 选择该仓库 → 框架会自动识别 Next.js
 3. 配置环境变量（**Preview 与 Production 都要配**）：
    - `AUTH_SECRET`（必填，任意长随机串；不配会退回开发默认值）
