@@ -16,9 +16,9 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    const run = store.getRun(id)
+    const run = await store.getRun(id)
     if (!run) throw new AppError('NOT_FOUND', '生成任务不存在', '请返回项目页重新发起生成')
-    store.requireProjectForOwner(run.project_id, user.id)
+    await store.requireProjectForOwner(run.project_id, user.id)
 
     const result = await advanceRun(id)
     return ok({

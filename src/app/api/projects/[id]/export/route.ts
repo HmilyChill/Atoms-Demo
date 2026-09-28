@@ -16,9 +16,9 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    const project = store.requireProjectForOwner(id, user.id)
+    const project = await store.requireProjectForOwner(id, user.id)
 
-    const latest = store.getLatestSpecVersion(id)
+    const latest = await store.getLatestSpecVersion(id)
     if (!latest) {
       throw new AppError('CONFLICT', '该项目还没有生成过应用，暂无内容可导出', '请先生成一次应用再导出')
     }

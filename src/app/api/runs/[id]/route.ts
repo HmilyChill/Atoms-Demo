@@ -13,11 +13,11 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    const run = store.getRun(id)
+    const run = await store.getRun(id)
     if (!run) throw new AppError('NOT_FOUND', '生成任务不存在', '请返回项目页重新发起生成')
-    store.requireProjectForOwner(run.project_id, user.id)
+    await store.requireProjectForOwner(run.project_id, user.id)
 
-    const artifacts = store.listArtifactsByRun(id)
+    const artifacts = await store.listArtifactsByRun(id)
     return ok({
       run: {
         id: run.id,
@@ -42,7 +42,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
         payload: safeParse(a.payload),
         createdAt: a.created_at,
       })),
-      events: eventsFor(id),
+      events: await eventsFor(id),
     })
   })
 }

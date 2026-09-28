@@ -18,8 +18,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    const project = getStore().requireProjectForOwner(id, user.id)
-    const latest = getStore().getLatestSpecVersion(id)
+    const store = getStore()
+    const project = await store.requireProjectForOwner(id, user.id)
+    const latest = await store.getLatestSpecVersion(id)
 
     const origin = new URL(req.url).origin
     const token = createPreviewToken(id, 'ro', Date.now() + SHARE_TTL_MS - 1000 * 60 * 30)
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     return ok({
       url: shareUrl,
-      project: project?.name ?? '',
+      project: project.name,
       version: latest?.version ?? null,
       expiresInDays: 7,
       note: '只读链接：访问者可以浏览与操作界面，但无法写入数据；链接在 7 天后自动失效。',
@@ -39,8 +40,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
-    const latest = getStore().getLatestSpecVersion(id)
+    const store = getStore()
+    await store.requireProjectForOwner(id, user.id)
+    const latest = await store.getLatestSpecVersion(id)
     if (!latest) {
       return ok({ available: false, reason: '项目还没有生成过应用，暂无内容可分享' })
     }
@@ -48,7 +50,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     return ok({
       available: true,
       version: latest.version,
-      collections: getStore().listCollections(id),
+      collections: await store.listCollections(id),
       specName: (spec.meta as { name?: string } | undefined)?.name ?? '',
     })
   })

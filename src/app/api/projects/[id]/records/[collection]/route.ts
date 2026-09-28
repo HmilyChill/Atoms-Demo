@@ -42,7 +42,7 @@ async function resolveAccess(req: NextRequest, projectId: string): Promise<Acces
   }
   const user = await getCurrentUser()
   if (user) {
-    const project = getStore().getProjectForOwner(projectId, user.id)
+    const project = await getStore().getProjectForOwner(projectId, user.id)
     if (!project) {
       // 已认证但无权访问 → 统一 404，不通过错误码泄露资源是否存在
       throw new AppError('NOT_FOUND', '项目不存在或你没有访问权限', '返回项目列表重新选择')
@@ -52,23 +52,34 @@ async function resolveAccess(req: NextRequest, projectId: string): Promise<Acces
   throw new AppError('UNAUTHORIZED', '没有访问该应用数据的权限', '请返回工作台重新打开预览')
 }
 
-export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string; collection: string }> }): Promise<Response> {
+export async function GET(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string; collection: string }> },
+): Promise<Response> {
   return route(async () => {
     const { id, collection } = await ctx.params
     const access = await resolveAccess(req, id)
-    const rows = getStore().listRecords(id, collection)
+    const rows = await getStore().listRecords(id, collection)
     return ok(
       {
         collection,
         mode: access.mode,
-        records: rows.map((r) => ({ id: r.id, ...rowToJson<Record<string, unknown>>(r.data), createdAt: r.created_at, updatedAt: r.updated_at })),
+        records: rows.map((r) => ({
+          id: r.id,
+          ...rowToJson<Record<string, unknown>>(r.data),
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        })),
       },
       { headers: CORS_HEADERS },
     )
   })
 }
 
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string; collection: string }> }): Promise<Response> {
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string; collection: string }> },
+): Promise<Response> {
   return route(async () => {
     const { id, collection } = await ctx.params
     const access = await resolveAccess(req, id)
@@ -88,7 +99,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (JSON.stringify(record).length > 20_000) {
       throw new AppError('BAD_REQUEST', '单条记录体积过大', '请精简内容后重试')
     }
-    const row = getStore().createRecord(id, collection, record)
+    const row = await getStore().createRecord(id, collection, record)
     return ok({ id: row.id }, { status: 201, headers: CORS_HEADERS })
   })
 }

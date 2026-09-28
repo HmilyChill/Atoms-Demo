@@ -27,7 +27,7 @@ async function requireWritable(req: NextRequest, projectId: string): Promise<voi
   }
   const user = await getCurrentUser()
   if (user) {
-    if (getStore().getProjectForOwner(projectId, user.id)) return
+    if (await getStore().getProjectForOwner(projectId, user.id)) return
     // 已认证但无权访问 → 404（与其它接口保持一致，且不泄露存在性）
     throw new AppError('NOT_FOUND', '项目不存在或你没有访问权限', '返回项目列表重新选择')
   }
@@ -43,7 +43,7 @@ export async function PATCH(
     await requireWritable(req, id)
     const body = await readJson<{ patch?: Record<string, unknown> }>(req)
     const patch = body.patch ?? {}
-    const row = getStore().updateRecord(id, collection, recordId, patch)
+    const row = await getStore().updateRecord(id, collection, recordId, patch)
     if (!row) {
       throw new AppError('NOT_FOUND', '记录不存在或已被删除', '请刷新页面查看最新数据')
     }
@@ -58,7 +58,7 @@ export async function DELETE(
   return route(async () => {
     const { id, collection, recordId } = await ctx.params
     await requireWritable(req, id)
-    const removed = getStore().deleteRecord(id, collection, recordId)
+    const removed = await getStore().deleteRecord(id, collection, recordId)
     if (!removed) {
       throw new AppError('NOT_FOUND', '记录不存在或已被删除', '请刷新页面查看最新数据')
     }

@@ -5,6 +5,7 @@ import { env } from '@/lib/env'
 import { AppError } from '@/lib/errors'
 import { DDL, SCHEMA_VERSION } from './schema'
 import { newId, nowIso } from '@/lib/ids'
+import { NodeSqliteExecutor, TursoExecutor, type SqlExecutor } from './executor'
 
 // ─────────────────────────────────────────────────────────────
 // 实体类型（见 docs/03-项目流程Spec.md §4）
@@ -30,7 +31,15 @@ export interface ProjectRow {
   updated_at: string
 }
 
-export type SessionStatus = 'idle' | 'planning' | 'awaiting_confirm' | 'generating' | 'verifying' | 'done' | 'failed' | 'cancelled'
+export type SessionStatus =
+  | 'idle'
+  | 'planning'
+  | 'awaiting_confirm'
+  | 'generating'
+  | 'verifying'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
 
 export interface SessionRow {
   id: string
@@ -121,38 +130,43 @@ export interface EventLogRow {
 
 // ─────────────────────────────────────────────────────────────
 // 存储适配器接口（I-08）：所有模块只能通过它读写数据
+//
+// ⚠️ 所有方法均为**异步**：远程数据库只能经 HTTP 访问，同步接口无法承载。
+//    这样本地 SQLite 与 Turso（线上）可以共用同一套上层代码。
 // ─────────────────────────────────────────────────────────────
 
 export interface StoreProvider {
-  readonly kind: string
+  readonly kind: 'sqlite' | 'turso'
   readonly schemaVersion: number
 
   // users
-  createUser(input: { email: string; passwordHash: string; displayName: string }): UserRow
-  findUserByEmail(email: string): UserRow | null
-  findUserById(id: string): UserRow | null
+  createUser(input: { email: string; passwordHash: string; displayName: string }): Promise<UserRow>
+  findUserByEmail(email: string): Promise<UserRow | null>
+  findUserById(id: string): Promise<UserRow | null>
 
   // projects
-  createProject(input: { ownerId: string; name: string; description?: string }): ProjectRow
-  listProjectsByOwner(ownerId: string): ProjectRow[]
-  getProjectForOwner(id: string, ownerId: string): ProjectRow | null
-  /**
-   * 归属校验（I-01）：不属于该用户时抛出 NOT_FOUND。
-   * 所有对外入口必须使用本方法，避免"忘记检查返回值"导致的越权（IDOR）。
-   */
-  requireProjectForOwner(id: string, ownerId: string): ProjectRow
-  getProject(id: string): ProjectRow | null
-  updateProject(id: string, patch: { name?: string; description?: string }): ProjectRow
-  setCurrentSpecVersion(projectId: string, version: number): void
-  deleteProject(id: string): void
+  createProject(input: { ownerId: string; name: string; description?: string }): Promise<ProjectRow>
+  listProjectsByOwner(ownerId: string): Promise<ProjectRow[]>
+  getProjectForOwner(id: string, ownerId: string): Promise<ProjectRow | null>
+  /** 归属校验：不属于该用户时抛出 NOT_FOUND（避免"忘记检查返回值"导致越权） */
+  requireProjectForOwner(id: string, ownerId: string): Promise<ProjectRow>
+  getProject(id: string): Promise<ProjectRow | null>
+  updateProject(id: string, patch: { name?: string; description?: string }): Promise<ProjectRow>
+  setCurrentSpecVersion(projectId: string, version: number): Promise<void>
+  deleteProject(id: string): Promise<void>
 
   // sessions & messages
-  createSession(input: { projectId: string; title?: string }): SessionRow
-  getSession(id: string): SessionRow | null
-  listSessions(projectId: string): SessionRow[]
-  updateSession(id: string, patch: { title?: string; status?: SessionStatus }): void
-  addMessage(input: { sessionId: string; role: MessageRow['role']; content: string; runId?: string | null }): MessageRow
-  listMessages(sessionId: string): MessageRow[]
+  createSession(input: { projectId: string; title?: string }): Promise<SessionRow>
+  getSession(id: string): Promise<SessionRow | null>
+  listSessions(projectId: string): Promise<SessionRow[]>
+  updateSession(id: string, patch: { title?: string; status?: SessionStatus }): Promise<void>
+  addMessage(input: {
+    sessionId: string
+    role: MessageRow['role']
+    content: string
+    runId?: string | null
+  }): Promise<MessageRow>
+  listMessages(sessionId: string): Promise<MessageRow[]>
 
   // runs
   createRun(input: {
@@ -161,10 +175,10 @@ export interface StoreProvider {
     mode: RunMode
     userInput: string
     requireConfirm: boolean
-  }): RunRow
-  getRun(id: string): RunRow | null
-  listRunsByProject(projectId: string, limit?: number): RunRow[]
-  findActiveRunBySession(sessionId: string): RunRow | null
+  }): Promise<RunRow>
+  getRun(id: string): Promise<RunRow | null>
+  listRunsByProject(projectId: string, limit?: number): Promise<RunRow[]>
+  findActiveRunBySession(sessionId: string): Promise<RunRow | null>
   updateRun(
     id: string,
     patch: Partial<{
@@ -174,8 +188,8 @@ export interface StoreProvider {
       errorMessage: string | null
       finishedAt: string | null
     }>,
-  ): void
-  addRunUsage(id: string, tokens: number, calls: number): void
+  ): Promise<void>
+  addRunUsage(id: string, tokens: number, calls: number): Promise<void>
 
   // artifacts
   addArtifact(input: {
@@ -184,9 +198,9 @@ export interface StoreProvider {
     type: ArtifactType
     summary?: string
     payload: unknown
-  }): ArtifactRow
-  listArtifactsByRun(runId: string): ArtifactRow[]
-  getLatestArtifact(projectId: string, type: ArtifactType): ArtifactRow | null
+  }): Promise<ArtifactRow>
+  listArtifactsByRun(runId: string): Promise<ArtifactRow[]>
+  getLatestArtifact(projectId: string, type: ArtifactType): Promise<ArtifactRow | null>
 
   // spec versions
   addSpecVersion(input: {
@@ -194,27 +208,32 @@ export interface StoreProvider {
     spec: unknown
     parentVersion: number | null
     changeSummary?: string
-  }): SpecVersionRow
-  getSpecVersion(projectId: string, version: number): SpecVersionRow | null
-  getLatestSpecVersion(projectId: string): SpecVersionRow | null
-  listSpecVersions(projectId: string): SpecVersionRow[]
+  }): Promise<SpecVersionRow>
+  getSpecVersion(projectId: string, version: number): Promise<SpecVersionRow | null>
+  getLatestSpecVersion(projectId: string): Promise<SpecVersionRow | null>
+  listSpecVersions(projectId: string): Promise<SpecVersionRow[]>
 
   // generated-app data
-  listRecords(projectId: string, collection: string): AppRecordRow[]
-  createRecord(projectId: string, collection: string, data: Record<string, unknown>): AppRecordRow
-  updateRecord(projectId: string, collection: string, id: string, data: Record<string, unknown>): AppRecordRow | null
-  deleteRecord(projectId: string, collection: string, id: string): boolean
-  listCollections(projectId: string): string[]
+  listRecords(projectId: string, collection: string): Promise<AppRecordRow[]>
+  createRecord(projectId: string, collection: string, data: Record<string, unknown>): Promise<AppRecordRow>
+  updateRecord(
+    projectId: string,
+    collection: string,
+    id: string,
+    data: Record<string, unknown>,
+  ): Promise<AppRecordRow | null>
+  deleteRecord(projectId: string, collection: string, id: string): Promise<boolean>
+  listCollections(projectId: string): Promise<string[]>
 
   // events (I-05 / M12)
-  appendEvent(runId: string, type: string, payload: unknown): EventLogRow
-  listEventsSince(runId: string, afterEventId: number, limit?: number): EventLogRow[]
-  listEvents(runId: string): EventLogRow[]
+  appendEvent(runId: string, type: string, payload: unknown): Promise<EventLogRow>
+  listEventsSince(runId: string, afterEventId: number, limit?: number): Promise<EventLogRow[]>
+  listEvents(runId: string): Promise<EventLogRow[]>
 
   close(): void
 }
 
-function rowToJson<T>(value: string): T {
+export function rowToJson<T>(value: string): T {
   try {
     return JSON.parse(value) as T
   } catch {
@@ -222,29 +241,77 @@ function rowToJson<T>(value: string): T {
   }
 }
 
-export { rowToJson }
+// ─────────────────────────────────────────────────────────────
+// 懒初始化执行器：首次访问时才建表（远程 DDL 是异步的）
+// ─────────────────────────────────────────────────────────────
 
-class SqliteStore implements StoreProvider {
-  readonly kind = 'sqlite'
-  readonly schemaVersion = SCHEMA_VERSION
-  private db: DatabaseSync
+class SchemaInitExecutor implements SqlExecutor {
+  readonly kind: 'sqlite' | 'turso'
+  private readonly inner: SqlExecutor
+  private ready: Promise<void> | null = null
 
-  constructor(file: string) {
-    mkdirSync(dirname(file), { recursive: true })
-    this.db = new DatabaseSync(file)
-    this.db.exec(DDL)
+  // 注意：不要用 TS 参数属性（constructor(private x)）——
+  // Node 的 strip-only 类型剥离不支持该语法，测试会直接加载失败。
+  constructor(inner: SqlExecutor) {
+    this.inner = inner
+    this.kind = inner.kind
+  }
+
+  private ensure(): Promise<void> {
+    if (!this.ready) {
+      this.ready = this.inner.exec(DDL).catch((err) => {
+        this.ready = null // 失败后允许重试，避免永久卡死
+        throw new Error(`数据库初始化失败：${err instanceof Error ? err.message : String(err)}`)
+      })
+    }
+    return this.ready
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.ensure()
+    await this.inner.exec(sql)
+  }
+
+  async run(sql: string, params?: Parameters<SqlExecutor['run']>[1]) {
+    await this.ensure()
+    return this.inner.run(sql, params)
+  }
+
+  async get<T>(sql: string, params?: Parameters<SqlExecutor['get']>[1]) {
+    await this.ensure()
+    return this.inner.get<T>(sql, params)
+  }
+
+  async all<T>(sql: string, params?: Parameters<SqlExecutor['all']>[1]) {
+    await this.ensure()
+    return this.inner.all<T>(sql, params)
   }
 
   close(): void {
-    try {
-      this.db.close()
-    } catch {
-      /* 忽略重复关闭 */
-    }
+    this.inner.close()
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 唯一实现：同一套 SQL，跑在可替换的执行器上
+// ─────────────────────────────────────────────────────────────
+
+class SqlStore implements StoreProvider {
+  readonly kind: 'sqlite' | 'turso'
+  readonly schemaVersion = SCHEMA_VERSION
+  private readonly executor: SqlExecutor
+
+  constructor(executor: SqlExecutor) {
+    this.executor = new SchemaInitExecutor(executor)
+    this.kind = executor.kind
+  }
+
+  close(): void {
+    this.executor.close()
   }
 
   // ── users ──
-  createUser(input: { email: string; passwordHash: string; displayName: string }): UserRow {
+  async createUser(input: { email: string; passwordHash: string; displayName: string }): Promise<UserRow> {
     const now = nowIso()
     const row: UserRow = {
       id: newId('user'),
@@ -254,27 +321,25 @@ class SqliteStore implements StoreProvider {
       created_at: now,
       updated_at: now,
     }
-    this.db
-      .prepare(
-        `INSERT INTO users (id,email,password_hash,display_name,created_at,updated_at)
-         VALUES (?,?,?,?,?,?)`,
-      )
-      .run(row.id, row.email, row.password_hash, row.display_name, row.created_at, row.updated_at)
+    await this.executor.run(
+      `INSERT INTO users (id,email,password_hash,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
+      [row.id, row.email, row.password_hash, row.display_name, row.created_at, row.updated_at],
+    )
     return row
   }
 
-  findUserByEmail(email: string): UserRow | null {
-    const r = this.db.prepare(`SELECT * FROM users WHERE email = ?`).get(email.toLowerCase())
-    return (r as UserRow | undefined) ?? null
+  async findUserByEmail(email: string): Promise<UserRow | null> {
+    const r = await this.executor.get<UserRow>(`SELECT * FROM users WHERE email = ?`, [email.toLowerCase()])
+    return r ?? null
   }
 
-  findUserById(id: string): UserRow | null {
-    const r = this.db.prepare(`SELECT * FROM users WHERE id = ?`).get(id)
-    return (r as UserRow | undefined) ?? null
+  async findUserById(id: string): Promise<UserRow | null> {
+    const r = await this.executor.get<UserRow>(`SELECT * FROM users WHERE id = ?`, [id])
+    return r ?? null
   }
 
   // ── projects ──
-  createProject(input: { ownerId: string; name: string; description?: string }): ProjectRow {
+  async createProject(input: { ownerId: string; name: string; description?: string }): Promise<ProjectRow> {
     const now = nowIso()
     const row: ProjectRow = {
       id: newId('proj'),
@@ -286,12 +351,10 @@ class SqliteStore implements StoreProvider {
       created_at: now,
       updated_at: now,
     }
-    this.db
-      .prepare(
-        `INSERT INTO projects (id,owner_id,name,description,schema_version,current_spec_version,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?)`,
-      )
-      .run(
+    await this.executor.run(
+      `INSERT INTO projects (id,owner_id,name,description,schema_version,current_spec_version,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [
         row.id,
         row.owner_id,
         row.name,
@@ -300,23 +363,28 @@ class SqliteStore implements StoreProvider {
         row.current_spec_version,
         row.created_at,
         row.updated_at,
-      )
+      ],
+    )
     return row
   }
 
-  listProjectsByOwner(ownerId: string): ProjectRow[] {
-    return this.db
-      .prepare(`SELECT * FROM projects WHERE owner_id = ? ORDER BY updated_at DESC`)
-      .all(ownerId) as unknown as ProjectRow[]
+  async listProjectsByOwner(ownerId: string): Promise<ProjectRow[]> {
+    return this.executor.all<ProjectRow>(
+      `SELECT * FROM projects WHERE owner_id = ? ORDER BY updated_at DESC`,
+      [ownerId],
+    )
   }
 
-  getProjectForOwner(id: string, ownerId: string): ProjectRow | null {
-    const r = this.db.prepare(`SELECT * FROM projects WHERE id = ? AND owner_id = ?`).get(id, ownerId)
-    return (r as ProjectRow | undefined) ?? null
+  async getProjectForOwner(id: string, ownerId: string): Promise<ProjectRow | null> {
+    const r = await this.executor.get<ProjectRow>(`SELECT * FROM projects WHERE id = ? AND owner_id = ?`, [
+      id,
+      ownerId,
+    ])
+    return r ?? null
   }
 
-  requireProjectForOwner(id: string, ownerId: string): ProjectRow {
-    const project = this.getProjectForOwner(id, ownerId)
+  async requireProjectForOwner(id: string, ownerId: string): Promise<ProjectRow> {
+    const project = await this.getProjectForOwner(id, ownerId)
     if (!project) {
       // 统一返回 NOT_FOUND：不通过错误码泄露"资源是否存在"
       throw new AppError('NOT_FOUND', '项目不存在或你没有访问权限', '返回项目列表重新选择')
@@ -324,34 +392,39 @@ class SqliteStore implements StoreProvider {
     return project
   }
 
-  getProject(id: string): ProjectRow | null {
-    const r = this.db.prepare(`SELECT * FROM projects WHERE id = ?`).get(id)
-    return (r as ProjectRow | undefined) ?? null
+  async getProject(id: string): Promise<ProjectRow | null> {
+    const r = await this.executor.get<ProjectRow>(`SELECT * FROM projects WHERE id = ?`, [id])
+    return r ?? null
   }
 
-  updateProject(id: string, patch: { name?: string; description?: string }): ProjectRow {
-    const cur = this.getProject(id)
+  async updateProject(id: string, patch: { name?: string; description?: string }): Promise<ProjectRow> {
+    const cur = await this.getProject(id)
     if (!cur) throw new Error(`project not found: ${id}`)
     const name = patch.name ?? cur.name
     const description = patch.description ?? cur.description
-    this.db
-      .prepare(`UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?`)
-      .run(name, description, nowIso(), id)
+    await this.executor.run(`UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?`, [
+      name,
+      description,
+      nowIso(),
+      id,
+    ])
     return { ...cur, name, description }
   }
 
-  setCurrentSpecVersion(projectId: string, version: number): void {
-    this.db
-      .prepare(`UPDATE projects SET current_spec_version = ?, updated_at = ? WHERE id = ?`)
-      .run(version, nowIso(), projectId)
+  async setCurrentSpecVersion(projectId: string, version: number): Promise<void> {
+    await this.executor.run(`UPDATE projects SET current_spec_version = ?, updated_at = ? WHERE id = ?`, [
+      version,
+      nowIso(),
+      projectId,
+    ])
   }
 
-  deleteProject(id: string): void {
-    this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id)
+  async deleteProject(id: string): Promise<void> {
+    await this.executor.run(`DELETE FROM projects WHERE id = ?`, [id])
   }
 
   // ── sessions & messages ──
-  createSession(input: { projectId: string; title?: string }): SessionRow {
+  async createSession(input: { projectId: string; title?: string }): Promise<SessionRow> {
     const now = nowIso()
     const row: SessionRow = {
       id: newId('sess'),
@@ -361,37 +434,42 @@ class SqliteStore implements StoreProvider {
       created_at: now,
       updated_at: now,
     }
-    this.db
-      .prepare(`INSERT INTO sessions (id,project_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?)`)
-      .run(row.id, row.project_id, row.title, row.status, row.created_at, row.updated_at)
+    await this.executor.run(
+      `INSERT INTO sessions (id,project_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
+      [row.id, row.project_id, row.title, row.status, row.created_at, row.updated_at],
+    )
     return row
   }
 
-  getSession(id: string): SessionRow | null {
-    const r = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id)
-    return (r as SessionRow | undefined) ?? null
+  async getSession(id: string): Promise<SessionRow | null> {
+    const r = await this.executor.get<SessionRow>(`SELECT * FROM sessions WHERE id = ?`, [id])
+    return r ?? null
   }
 
-  listSessions(projectId: string): SessionRow[] {
-    return this.db
-      .prepare(`SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at DESC`)
-      .all(projectId) as unknown as SessionRow[]
+  async listSessions(projectId: string): Promise<SessionRow[]> {
+    return this.executor.all<SessionRow>(
+      `SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at DESC`,
+      [projectId],
+    )
   }
 
-  updateSession(id: string, patch: { title?: string; status?: SessionStatus }): void {
-    const cur = this.getSession(id)
+  async updateSession(id: string, patch: { title?: string; status?: SessionStatus }): Promise<void> {
+    const cur = await this.getSession(id)
     if (!cur) return
-    this.db
-      .prepare(`UPDATE sessions SET title = ?, status = ?, updated_at = ? WHERE id = ?`)
-      .run(patch.title ?? cur.title, patch.status ?? cur.status, nowIso(), id)
+    await this.executor.run(`UPDATE sessions SET title = ?, status = ?, updated_at = ? WHERE id = ?`, [
+      patch.title ?? cur.title,
+      patch.status ?? cur.status,
+      nowIso(),
+      id,
+    ])
   }
 
-  addMessage(input: {
+  async addMessage(input: {
     sessionId: string
     role: MessageRow['role']
     content: string
     runId?: string | null
-  }): MessageRow {
+  }): Promise<MessageRow> {
     const row: MessageRow = {
       id: newId('msg'),
       session_id: input.sessionId,
@@ -400,26 +478,28 @@ class SqliteStore implements StoreProvider {
       run_id: input.runId ?? null,
       created_at: nowIso(),
     }
-    this.db
-      .prepare(`INSERT INTO messages (id,session_id,role,content,run_id,created_at) VALUES (?,?,?,?,?,?)`)
-      .run(row.id, row.session_id, row.role, row.content, row.run_id, row.created_at)
+    await this.executor.run(
+      `INSERT INTO messages (id,session_id,role,content,run_id,created_at) VALUES (?,?,?,?,?,?)`,
+      [row.id, row.session_id, row.role, row.content, row.run_id, row.created_at],
+    )
     return row
   }
 
-  listMessages(sessionId: string): MessageRow[] {
-    return this.db
-      .prepare(`SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC`)
-      .all(sessionId) as unknown as MessageRow[]
+  async listMessages(sessionId: string): Promise<MessageRow[]> {
+    return this.executor.all<MessageRow>(
+      `SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
+      [sessionId],
+    )
   }
 
   // ── runs ──
-  createRun(input: {
+  async createRun(input: {
     sessionId: string
     projectId: string
     mode: RunMode
     userInput: string
     requireConfirm: boolean
-  }): RunRow {
+  }): Promise<RunRow> {
     const now = nowIso()
     const row: RunRow = {
       id: newId('run'),
@@ -438,13 +518,11 @@ class SqliteStore implements StoreProvider {
       finished_at: null,
       updated_at: now,
     }
-    this.db
-      .prepare(
-        `INSERT INTO runs (id,session_id,project_id,status,stage,mode,require_confirm,user_input,
-          error_code,error_message,token_usage,call_count,started_at,finished_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
+    await this.executor.run(
+      `INSERT INTO runs (id,session_id,project_id,status,stage,mode,require_confirm,user_input,
+        error_code,error_message,token_usage,call_count,started_at,finished_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
         row.id,
         row.session_id,
         row.project_id,
@@ -460,32 +538,33 @@ class SqliteStore implements StoreProvider {
         row.started_at,
         row.finished_at,
         row.updated_at,
-      )
+      ],
+    )
     return row
   }
 
-  getRun(id: string): RunRow | null {
-    const r = this.db.prepare(`SELECT * FROM runs WHERE id = ?`).get(id)
-    return (r as RunRow | undefined) ?? null
+  async getRun(id: string): Promise<RunRow | null> {
+    const r = await this.executor.get<RunRow>(`SELECT * FROM runs WHERE id = ?`, [id])
+    return r ?? null
   }
 
-  listRunsByProject(projectId: string, limit = 20): RunRow[] {
-    return this.db
-      .prepare(`SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC LIMIT ?`)
-      .all(projectId, limit) as unknown as RunRow[]
+  async listRunsByProject(projectId: string, limit = 20): Promise<RunRow[]> {
+    return this.executor.all<RunRow>(
+      `SELECT * FROM runs WHERE project_id = ? ORDER BY started_at DESC LIMIT ?`,
+      [projectId, limit],
+    )
   }
 
-  findActiveRunBySession(sessionId: string): RunRow | null {
-    const r = this.db
-      .prepare(
-        `SELECT * FROM runs WHERE session_id = ? AND status IN ('pending','running','awaiting_confirm')
-         ORDER BY started_at DESC LIMIT 1`,
-      )
-      .get(sessionId)
-    return (r as RunRow | undefined) ?? null
+  async findActiveRunBySession(sessionId: string): Promise<RunRow | null> {
+    const r = await this.executor.get<RunRow>(
+      `SELECT * FROM runs WHERE session_id = ? AND status IN ('pending','running','awaiting_confirm')
+       ORDER BY started_at DESC LIMIT 1`,
+      [sessionId],
+    )
+    return r ?? null
   }
 
-  updateRun(
+  async updateRun(
     id: string,
     patch: Partial<{
       status: RunStatus
@@ -494,14 +573,12 @@ class SqliteStore implements StoreProvider {
       errorMessage: string | null
       finishedAt: string | null
     }>,
-  ): void {
-    const cur = this.getRun(id)
+  ): Promise<void> {
+    const cur = await this.getRun(id)
     if (!cur) return
-    this.db
-      .prepare(
-        `UPDATE runs SET status=?, stage=?, error_code=?, error_message=?, finished_at=?, updated_at=? WHERE id=?`,
-      )
-      .run(
+    await this.executor.run(
+      `UPDATE runs SET status=?, stage=?, error_code=?, error_message=?, finished_at=?, updated_at=? WHERE id=?`,
+      [
         patch.status ?? cur.status,
         patch.stage ?? cur.stage,
         patch.errorCode === undefined ? cur.error_code : patch.errorCode,
@@ -509,23 +586,25 @@ class SqliteStore implements StoreProvider {
         patch.finishedAt === undefined ? cur.finished_at : patch.finishedAt,
         nowIso(),
         id,
-      )
+      ],
+    )
   }
 
-  addRunUsage(id: string, tokens: number, calls: number): void {
-    this.db
-      .prepare(`UPDATE runs SET token_usage = token_usage + ?, call_count = call_count + ?, updated_at = ? WHERE id = ?`)
-      .run(tokens, calls, nowIso(), id)
+  async addRunUsage(id: string, tokens: number, calls: number): Promise<void> {
+    await this.executor.run(
+      `UPDATE runs SET token_usage = token_usage + ?, call_count = call_count + ?, updated_at = ? WHERE id = ?`,
+      [tokens, calls, nowIso(), id],
+    )
   }
 
   // ── artifacts ──
-  addArtifact(input: {
+  async addArtifact(input: {
     runId: string
     projectId: string
     type: ArtifactType
     summary?: string
     payload: unknown
-  }): ArtifactRow {
+  }): Promise<ArtifactRow> {
     const row: ArtifactRow = {
       id: newId('art'),
       run_id: input.runId,
@@ -535,81 +614,86 @@ class SqliteStore implements StoreProvider {
       payload: JSON.stringify(input.payload),
       created_at: nowIso(),
     }
-    this.db
-      .prepare(`INSERT INTO artifacts (id,run_id,project_id,type,summary,payload,created_at) VALUES (?,?,?,?,?,?,?)`)
-      .run(row.id, row.run_id, row.project_id, row.type, row.summary, row.payload, row.created_at)
+    await this.executor.run(
+      `INSERT INTO artifacts (id,run_id,project_id,type,summary,payload,created_at) VALUES (?,?,?,?,?,?,?)`,
+      [row.id, row.run_id, row.project_id, row.type, row.summary, row.payload, row.created_at],
+    )
     return row
   }
 
-  listArtifactsByRun(runId: string): ArtifactRow[] {
-    return this.db
-      .prepare(`SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at ASC`)
-      .all(runId) as unknown as ArtifactRow[]
+  async listArtifactsByRun(runId: string): Promise<ArtifactRow[]> {
+    return this.executor.all<ArtifactRow>(`SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at ASC`, [
+      runId,
+    ])
   }
 
-  getLatestArtifact(projectId: string, type: ArtifactType): ArtifactRow | null {
-    const r = this.db
-      .prepare(`SELECT * FROM artifacts WHERE project_id = ? AND type = ? ORDER BY created_at DESC LIMIT 1`)
-      .get(projectId, type)
-    return (r as ArtifactRow | undefined) ?? null
+  async getLatestArtifact(projectId: string, type: ArtifactType): Promise<ArtifactRow | null> {
+    const r = await this.executor.get<ArtifactRow>(
+      `SELECT * FROM artifacts WHERE project_id = ? AND type = ? ORDER BY created_at DESC LIMIT 1`,
+      [projectId, type],
+    )
+    return r ?? null
   }
 
   // ── spec versions ──
-  addSpecVersion(input: {
+  async addSpecVersion(input: {
     projectId: string
     spec: unknown
     parentVersion: number | null
     changeSummary?: string
-  }): SpecVersionRow {
-    const latest = this.getLatestSpecVersion(input.projectId)
-    const version = (latest?.version ?? 0) + 1
-    const row: SpecVersionRow = {
-      id: newId('spec'),
-      project_id: input.projectId,
-      version,
-      spec: JSON.stringify(input.spec),
-      parent_version: input.parentVersion,
-      change_summary: input.changeSummary ?? '',
-      created_at: nowIso(),
-    }
-    this.db
-      .prepare(
-        `INSERT INTO spec_versions (id,project_id,version,spec,parent_version,change_summary,created_at)
-         VALUES (?,?,?,?,?,?,?)`,
-      )
-      .run(row.id, row.project_id, row.version, row.spec, row.parent_version, row.change_summary, row.created_at)
-    this.setCurrentSpecVersion(input.projectId, version)
+  }): Promise<SpecVersionRow> {
+    const id = newId('spec')
+    const now = nowIso()
+    // 用 INSERT..SELECT 在同一语句内取 MAX(version)+1，避免"先读后写"在并发下的版本号竞争
+    await this.executor.run(
+      `INSERT INTO spec_versions (id,project_id,version,spec,parent_version,change_summary,created_at)
+       SELECT ?, ?, COALESCE(MAX(version), 0) + 1, ?, ?, ?, ? FROM spec_versions WHERE project_id = ?`,
+      [id, input.projectId, JSON.stringify(input.spec), input.parentVersion, input.changeSummary ?? '', now, input.projectId],
+    )
+    // 按主键回读（而不是 ORDER BY version DESC LIMIT 1）：
+    // 并发下"最新一行"可能已被别的请求覆盖，会导致返回值错乱。
+    const row = await this.executor.get<SpecVersionRow>(`SELECT * FROM spec_versions WHERE id = ?`, [id])
+    if (!row) throw new Error('写入 Spec 版本后未能读回，数据库状态异常')
+    await this.setCurrentSpecVersion(input.projectId, row.version)
     return row
   }
 
-  getSpecVersion(projectId: string, version: number): SpecVersionRow | null {
-    const r = this.db
-      .prepare(`SELECT * FROM spec_versions WHERE project_id = ? AND version = ?`)
-      .get(projectId, version)
-    return (r as SpecVersionRow | undefined) ?? null
+  async getSpecVersion(projectId: string, version: number): Promise<SpecVersionRow | null> {
+    const r = await this.executor.get<SpecVersionRow>(
+      `SELECT * FROM spec_versions WHERE project_id = ? AND version = ?`,
+      [projectId, version],
+    )
+    return r ?? null
   }
 
-  getLatestSpecVersion(projectId: string): SpecVersionRow | null {
-    const r = this.db
-      .prepare(`SELECT * FROM spec_versions WHERE project_id = ? ORDER BY version DESC LIMIT 1`)
-      .get(projectId)
-    return (r as SpecVersionRow | undefined) ?? null
+  async getLatestSpecVersion(projectId: string): Promise<SpecVersionRow | null> {
+    const r = await this.executor.get<SpecVersionRow>(
+      `SELECT * FROM spec_versions WHERE project_id = ? ORDER BY version DESC LIMIT 1`,
+      [projectId],
+    )
+    return r ?? null
   }
 
-  listSpecVersions(projectId: string): SpecVersionRow[] {
-    return this.db
-      .prepare(`SELECT * FROM spec_versions WHERE project_id = ? ORDER BY version DESC`)
-      .all(projectId) as unknown as SpecVersionRow[]
+  async listSpecVersions(projectId: string): Promise<SpecVersionRow[]> {
+    return this.executor.all<SpecVersionRow>(
+      `SELECT * FROM spec_versions WHERE project_id = ? ORDER BY version DESC`,
+      [projectId],
+    )
   }
 
   // ── generated-app data ──
-  listRecords(projectId: string, collection: string): AppRecordRow[] {
-    return this.db
-      .prepare(`SELECT * FROM app_records WHERE project_id = ? AND collection = ? ORDER BY created_at DESC`)
-      .all(projectId, collection) as unknown as AppRecordRow[]
+  async listRecords(projectId: string, collection: string): Promise<AppRecordRow[]> {
+    return this.executor.all<AppRecordRow>(
+      `SELECT * FROM app_records WHERE project_id = ? AND collection = ? ORDER BY created_at DESC`,
+      [projectId, collection],
+    )
   }
 
-  createRecord(projectId: string, collection: string, data: Record<string, unknown>): AppRecordRow {
+  async createRecord(
+    projectId: string,
+    collection: string,
+    data: Record<string, unknown>,
+  ): Promise<AppRecordRow> {
     const now = nowIso()
     const row: AppRecordRow = {
       id: newId('rec'),
@@ -619,74 +703,92 @@ class SqliteStore implements StoreProvider {
       created_at: now,
       updated_at: now,
     }
-    this.db
-      .prepare(`INSERT INTO app_records (id,project_id,collection,data,created_at,updated_at) VALUES (?,?,?,?,?,?)`)
-      .run(row.id, row.project_id, row.collection, row.data, row.created_at, row.updated_at)
+    await this.executor.run(
+      `INSERT INTO app_records (id,project_id,collection,data,created_at,updated_at) VALUES (?,?,?,?,?,?)`,
+      [row.id, row.project_id, row.collection, row.data, row.created_at, row.updated_at],
+    )
     return row
   }
 
-  updateRecord(
+  async updateRecord(
     projectId: string,
     collection: string,
     id: string,
     data: Record<string, unknown>,
-  ): AppRecordRow | null {
-    const r = this.db
-      .prepare(`SELECT * FROM app_records WHERE id = ? AND project_id = ? AND collection = ?`)
-      .get(id, projectId, collection) as AppRecordRow | undefined
+  ): Promise<AppRecordRow | null> {
+    const r = await this.executor.get<AppRecordRow>(
+      `SELECT * FROM app_records WHERE id = ? AND project_id = ? AND collection = ?`,
+      [id, projectId, collection],
+    )
     if (!r) return null
     const merged = { ...rowToJson<Record<string, unknown>>(r.data), ...data }
-    this.db
-      .prepare(`UPDATE app_records SET data = ?, updated_at = ? WHERE id = ?`)
-      .run(JSON.stringify(merged), nowIso(), id)
+    await this.executor.run(`UPDATE app_records SET data = ?, updated_at = ? WHERE id = ?`, [
+      JSON.stringify(merged),
+      nowIso(),
+      id,
+    ])
     return { ...r, data: JSON.stringify(merged) }
   }
 
-  deleteRecord(projectId: string, collection: string, id: string): boolean {
-    const res = this.db
-      .prepare(`DELETE FROM app_records WHERE id = ? AND project_id = ? AND collection = ?`)
-      .run(id, projectId, collection)
+  async deleteRecord(projectId: string, collection: string, id: string): Promise<boolean> {
+    const res = await this.executor.run(
+      `DELETE FROM app_records WHERE id = ? AND project_id = ? AND collection = ?`,
+      [id, projectId, collection],
+    )
     return Number(res.changes ?? 0) > 0
   }
 
-  listCollections(projectId: string): string[] {
-    const rows = this.db
-      .prepare(`SELECT DISTINCT collection FROM app_records WHERE project_id = ?`)
-      .all(projectId) as unknown as Array<{ collection: string }>
+  async listCollections(projectId: string): Promise<string[]> {
+    const rows = await this.executor.all<{ collection: string }>(
+      `SELECT DISTINCT collection FROM app_records WHERE project_id = ?`,
+      [projectId],
+    )
     return rows.map((r) => r.collection)
   }
 
   // ── events ──
-  appendEvent(runId: string, type: string, payload: unknown): EventLogRow {
-    const next = this.db
-      .prepare(`SELECT COALESCE(MAX(event_id), 0) AS m FROM event_logs WHERE run_id = ?`)
-      .get(runId) as { m: number }
-    const eventId = Number(next?.m ?? 0) + 1
-    const row: EventLogRow = {
-      id: newId('evt'),
-      run_id: runId,
-      event_id: eventId,
-      type,
-      payload: JSON.stringify(payload ?? {}),
-      created_at: nowIso(),
-    }
-    this.db
-      .prepare(`INSERT INTO event_logs (id,run_id,event_id,type,payload,created_at) VALUES (?,?,?,?,?,?)`)
-      .run(row.id, row.run_id, row.event_id, row.type, row.payload, row.created_at)
+  async appendEvent(runId: string, type: string, payload: unknown): Promise<EventLogRow> {
+    const id = newId('evt')
+    const now = nowIso()
+    // 同一语句内取 MAX(event_id)+1，保证 eventId 单调递增且无并发竞争
+    await this.executor.run(
+      `INSERT INTO event_logs (id,run_id,event_id,type,payload,created_at)
+       SELECT ?, ?, COALESCE(MAX(event_id), 0) + 1, ?, ?, ? FROM event_logs WHERE run_id = ?`,
+      [id, runId, type, JSON.stringify(payload ?? {}), now, runId],
+    )
+    // 按主键回读：并发下"最新一行"可能已被其它请求覆盖
+    const row = await this.executor.get<EventLogRow>(`SELECT * FROM event_logs WHERE id = ?`, [id])
+    if (!row) throw new Error('写入事件后未能读回，数据库状态异常')
     return row
   }
 
-  listEventsSince(runId: string, afterEventId: number, limit = 200): EventLogRow[] {
-    return this.db
-      .prepare(`SELECT * FROM event_logs WHERE run_id = ? AND event_id > ? ORDER BY event_id ASC LIMIT ?`)
-      .all(runId, afterEventId, limit) as unknown as EventLogRow[]
+  async listEventsSince(runId: string, afterEventId: number, limit = 200): Promise<EventLogRow[]> {
+    return this.executor.all<EventLogRow>(
+      `SELECT * FROM event_logs WHERE run_id = ? AND event_id > ? ORDER BY event_id ASC LIMIT ?`,
+      [runId, afterEventId, limit],
+    )
   }
 
-  listEvents(runId: string): EventLogRow[] {
-    return this.db
-      .prepare(`SELECT * FROM event_logs WHERE run_id = ? ORDER BY event_id ASC`)
-      .all(runId) as unknown as EventLogRow[]
+  async listEvents(runId: string): Promise<EventLogRow[]> {
+    return this.executor.all<EventLogRow>(
+      `SELECT * FROM event_logs WHERE run_id = ? ORDER BY event_id ASC`,
+      [runId],
+    )
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 执行器选择：有托管库 URL 就用 Turso，否则用本地 SQLite 文件
+// ─────────────────────────────────────────────────────────────
+
+export function createExecutor(): SqlExecutor {
+  const url = env.databaseUrl
+  if (url !== '') {
+    return new TursoExecutor({ url, token: env.databaseToken, timeoutMs: env.databaseTimeoutMs })
+  }
+  mkdirSync(dirname(env.dbFile), { recursive: true })
+  const db = new DatabaseSync(env.dbFile) as unknown as ConstructorParameters<typeof NodeSqliteExecutor>[0]
+  return new NodeSqliteExecutor(db)
 }
 
 // HMR 下复用同一连接（Next dev 会重复求值模块）
@@ -694,7 +796,13 @@ const globalForStore = globalThis as unknown as { __atomsStore?: StoreProvider }
 
 export function getStore(): StoreProvider {
   if (!globalForStore.__atomsStore) {
-    globalForStore.__atomsStore = new SqliteStore(env.dbFile)
+    globalForStore.__atomsStore = new SqlStore(createExecutor())
   }
   return globalForStore.__atomsStore
+}
+
+/** 仅用于测试：重置单例并关闭连接 */
+export function resetStore(): void {
+  globalForStore.__atomsStore?.close()
+  globalForStore.__atomsStore = undefined
 }

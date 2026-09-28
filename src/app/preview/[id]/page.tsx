@@ -24,11 +24,11 @@ export default async function PreviewPage({
 
   const claims = verifyPreviewToken(pt)
   let allowed = claims !== null && claims.projectId === id
-  let readOnly = claims?.mode === 'ro'
+  const readOnly = claims?.mode === 'ro'
 
   if (!allowed) {
     const user = await getCurrentUser()
-    if (user && getStore().getProjectForOwner(id, user.id)) allowed = true
+    if (user && (await getStore().getProjectForOwner(id, user.id))) allowed = true
   }
 
   if (!allowed) {
@@ -45,7 +45,7 @@ export default async function PreviewPage({
     )
   }
 
-  const latest = getStore().getLatestSpecVersion(id)
+  const latest = await getStore().getLatestSpecVersion(id)
   if (!latest) {
     return (
       <div className="p-8 text-sm text-slate-600">

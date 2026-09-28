@@ -9,24 +9,24 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
+    const store = getStore()
+    await store.requireProjectForOwner(id, user.id)
 
     const url = new URL(req.url)
     const versionParam = url.searchParams.get('version')
-    const store = getStore()
 
-    const versions = store.listSpecVersions(id)
+    const versions = await store.listSpecVersions(id)
     let target = null
     if (versionParam) {
       const v = Number.parseInt(versionParam, 10)
       if (!Number.isFinite(v)) throw new AppError('BAD_REQUEST', '版本号不合法', '请从版本列表中选择')
-      target = store.getSpecVersion(id, v)
+      target = await store.getSpecVersion(id, v)
       if (!target) throw new AppError('NOT_FOUND', '该版本不存在', '请在版本列表中选择其它版本')
     } else {
       target = versions[0] ?? null
     }
 
-    const verification = store.getLatestArtifact(id, 'verification')
+    const verification = await store.getLatestArtifact(id, 'verification')
 
     return ok({
       version: target ? target.version : null,

@@ -7,7 +7,7 @@ import { ok, readJson, route } from '@/lib/api/http'
 export async function GET(): Promise<Response> {
   return route(async () => {
     const user = await requireUser()
-    const projects = getStore().listProjectsByOwner(user.id)
+    const projects = await getStore().listProjectsByOwner(user.id)
     return ok({
       projects: projects.map((p) => ({
         id: p.id,
@@ -33,13 +33,13 @@ export async function POST(req: NextRequest): Promise<Response> {
       throw new AppError('BAD_REQUEST', '项目名称过长', '请控制在 60 个字符以内')
     }
     const store = getStore()
-    const project = store.createProject({
+    const project = await store.createProject({
       ownerId: user.id,
       name,
       description: (body.description ?? '').trim(),
     })
     // 每个项目自动带一个会话，作为多轮迭代的载体
-    store.createSession({ projectId: project.id, title: '初始会话' })
+    await store.createSession({ projectId: project.id, title: '初始会话' })
     return ok({ project: { id: project.id, name: project.name, description: project.description } })
   })
 }

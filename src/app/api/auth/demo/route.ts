@@ -18,15 +18,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   return route(async () => {
     const limit = checkRateLimit(`demo:${clientKey(req)}`, Date.now())
     if (!limit.ok) {
-      throw new AppError('RATE_LIMITED', '体验账号创建过于频繁', `请在 ${limit.retryAfterSec ?? 60} 秒后重试，或直接注册账号`)
+      throw new AppError(
+        'RATE_LIMITED',
+        '体验账号创建过于频繁',
+        `请在 ${limit.retryAfterSec ?? 60} 秒后重试，或直接注册账号`,
+      )
     }
 
     const suffix = randomBytes(4).toString('hex')
     const email = `demo-${suffix}@atoms-demo.local`
     const password = randomBytes(12).toString('base64url')
 
-    const store = getStore()
-    const user = store.createUser({
+    const user = await getStore().createUser({
       email,
       passwordHash: hashPassword(password),
       displayName: `体验用户 ${suffix}`,

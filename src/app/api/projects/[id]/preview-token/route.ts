@@ -15,7 +15,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
+    await getStore().requireProjectForOwner(id, user.id)
     const token = createPreviewToken(id, 'rw')
     return ok({ token, expiresInSec: 1800, mode: 'rw' })
   })

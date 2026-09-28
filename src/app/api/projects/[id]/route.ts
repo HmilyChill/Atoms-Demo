@@ -9,11 +9,13 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    const project = store.getProjectForOwner(id, user.id)
+    const project = await store.getProjectForOwner(id, user.id)
     if (!project) throw new AppError('NOT_FOUND', '项目不存在或你没有访问权限', '返回项目列表重新选择')
-    const sessions = store.listSessions(id)
-    const runs = store.listRunsByProject(id, 10)
-    const latest = store.getLatestSpecVersion(id)
+
+    const sessions = await store.listSessions(id)
+    const runs = await store.listRunsByProject(id, 10)
+    const latest = await store.getLatestSpecVersion(id)
+
     return ok({
       project: {
         id: project.id,
@@ -46,7 +48,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    store.requireProjectForOwner(id, user.id)
+    await store.requireProjectForOwner(id, user.id)
+
     const body = await readJson<{ name?: string; description?: string }>(req)
     const patch: { name?: string; description?: string } = {}
     if (typeof body.name === 'string') {
@@ -55,7 +58,8 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       patch.name = name.slice(0, 60)
     }
     if (typeof body.description === 'string') patch.description = body.description.slice(0, 500)
-    const updated = store.updateProject(id, patch)
+
+    const updated = await store.updateProject(id, patch)
     return ok({ project: { id: updated.id, name: updated.name, description: updated.description } })
   })
 }
@@ -65,8 +69,8 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
     const user = await requireUser()
     const { id } = await ctx.params
     const store = getStore()
-    store.requireProjectForOwner(id, user.id)
-    store.deleteProject(id)
+    await store.requireProjectForOwner(id, user.id)
+    await store.deleteProject(id)
     return ok({ deleted: true })
   })
 }

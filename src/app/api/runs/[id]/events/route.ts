@@ -7,7 +7,8 @@ import { eventsSince } from '@/lib/events/bus'
  * SSE 事件流（docs/03 §6）。
  *
  * 实现说明：事件**持久化在数据库**，本接口按 eventId 轮询增量推送。
- * 好处是天然支持断线续传（Last-Event-ID）与多标签页，且不依赖进程内状态。
+ * 好处是天然支持断线续传（Last-Event-ID）与多标签页，且不依赖进程内状态，
+ * 因此在 Serverless（多实例）下同样成立。
  */
 const POLL_MS = 350
 const TERMINAL = ['succeeded', 'failed', 'cancelled']
@@ -17,8 +18,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const user = await getCurrentUser()
   const store = getStore()
-  const run = store.getRun(id)
-  if (!user || !run || !store.getProjectForOwner(run.project_id, user.id)) {
+  const run = await store.getRun(id)
+  if (!user || !run || !(await store.getProjectForOwner(run.project_id, user.id))) {
     return new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: '没有权限订阅该任务的事件' } }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
@@ -60,15 +61,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
       let idleAfterTerminal = 0
 
-      const tick = () => {
+      const tick = async (): Promise<void> => {
         if (closed) return
         try {
-          const batch = eventsSince(id, lastId)
+          const batch = await eventsSince(id, lastId)
           for (const evt of batch) {
             lastId = evt.eventId
             write(`id: ${evt.eventId}\nevent: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`)
           }
-          const current = store.getRun(id)
+          const current = await store.getRun(id)
           const isTerminal = !!current && TERMINAL.includes(current.status)
           if (isTerminal) {
             idleAfterTerminal += 1
@@ -84,11 +85,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
           cleanup()
           return
         }
-        timer = setTimeout(tick, POLL_MS)
+        timer = setTimeout(() => {
+          void tick()
+        }, POLL_MS)
       }
 
       req.signal.addEventListener('abort', cleanup)
-      tick()
+      void tick()
     },
     cancel() {
       closed = true

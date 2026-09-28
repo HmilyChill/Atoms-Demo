@@ -30,6 +30,21 @@ export const env = {
     return explicit !== '' ? explicit : `${str('ATOMS_DATA_DIR', '.data')}/atoms.db`
   },
 
+  /**
+   * 托管数据库地址（Turso / libSQL）。
+   * 一旦配置，存储层会自动从本地 SQLite 文件切换到 Turso SQL over HTTP
+   * —— 这是 Serverless（Vercel 等只读文件系统）上线持久化的开关。
+   */
+  get databaseUrl(): string {
+    return str('TURSO_DATABASE_URL') || str('ATOMS_DB_URL')
+  },
+  get databaseToken(): string {
+    return str('TURSO_AUTH_TOKEN') || str('ATOMS_DB_TOKEN')
+  },
+  get databaseTimeoutMs(): number {
+    return int('DB_TIMEOUT_MS', 20_000)
+  },
+
   get authSecret(): string {
     return str('AUTH_SECRET', 'dev-only-insecure-secret-please-override')
   },

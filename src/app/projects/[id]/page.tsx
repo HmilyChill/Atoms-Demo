@@ -10,7 +10,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const user = await getCurrentUser()
   if (!user) redirect('/login')
 
-  const project = getStore().getProjectForOwner(id, user.id)
+  const project = await getStore().getProjectForOwner(id, user.id)
   if (!project) {
     return (
       <div className="mx-auto max-w-md p-10 text-sm text-slate-600">

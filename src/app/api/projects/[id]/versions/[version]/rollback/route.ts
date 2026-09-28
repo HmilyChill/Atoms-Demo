@@ -17,23 +17,23 @@ export async function POST(
   return route(async () => {
     const user = await requireUser()
     const { id, version } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
+    const store = getStore()
+    await store.requireProjectForOwner(id, user.id)
 
     const targetVersion = Number.parseInt(version, 10)
     if (!Number.isFinite(targetVersion)) {
       throw new AppError('BAD_REQUEST', '版本号不合法', '请从版本列表中选择要回滚的版本')
     }
 
-    const store = getStore()
-    const target = store.getSpecVersion(id, targetVersion)
+    const target = await store.getSpecVersion(id, targetVersion)
     if (!target) throw new AppError('NOT_FOUND', '该版本不存在', '请刷新版本列表后重试')
 
-    const current = store.getLatestSpecVersion(id)
+    const current = await store.getLatestSpecVersion(id)
     if (current && current.version === targetVersion) {
       throw new AppError('CONFLICT', '当前已经是最新版本，无需回滚', '如需修改请提交新的迭代需求')
     }
 
-    const created = store.addSpecVersion({
+    const created = await store.addSpecVersion({
       projectId: id,
       spec: rowToJson<Record<string, unknown>>(target.spec),
       parentVersion: current ? current.version : null,
@@ -41,9 +41,13 @@ export async function POST(
     })
 
     // 用该项目的最近一次 Run 作为事件宿主（若存在），保证可观测时间线不出现断点
-    const runs = store.listRunsByProject(id, 1)
+    const runs = await store.listRunsByProject(id, 1)
     if (runs[0]) {
-      emit(runs[0].id, 'preview.updated', { version: created.version, entryUrl: `/preview/${id}`, reason: 'rollback' })
+      await emit(runs[0].id, 'preview.updated', {
+        version: created.version,
+        entryUrl: `/preview/${id}`,
+        reason: 'rollback',
+      })
     }
 
     return ok({ version: created.version, rolledBackTo: targetVersion })

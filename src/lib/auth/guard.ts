@@ -24,11 +24,8 @@ export async function requireUser(): Promise<UserRow> {
 /**
  * 归属校验（I-01）。
  * 不属于当前用户时统一返回 NOT_FOUND，避免通过错误码枚举他人资源是否存在。
+ * 直接委托给存储层的 requireProjectForOwner，保证"检查"与"抛错"是同一处实现。
  */
-export function requireProject(projectId: string, ownerId: string): ProjectRow {
-  const project = getStore().getProjectForOwner(projectId, ownerId)
-  if (!project) {
-    throw new AppError('NOT_FOUND', '项目不存在或你没有访问权限', '返回项目列表重新选择')
-  }
-  return project
+export async function requireProject(projectId: string, ownerId: string): Promise<ProjectRow> {
+  return getStore().requireProjectForOwner(projectId, ownerId)
 }

@@ -23,11 +23,11 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
 
     const store = getStore()
-    if (store.findUserByEmail(email)) {
+    if (await store.findUserByEmail(email)) {
       throw new AppError('CONFLICT', '该邮箱已被注册', '可以直接登录，或换一个邮箱')
     }
 
-    const user = store.createUser({ email, passwordHash: hashPassword(password), displayName })
+    const user = await store.createUser({ email, passwordHash: hashPassword(password), displayName })
     const res = ok({ id: user.id, email: user.email, displayName: user.display_name })
     res.cookies.set(SESSION_COOKIE, createSessionToken(user.id), SESSION_COOKIE_OPTIONS)
     return res

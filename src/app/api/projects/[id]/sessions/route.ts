@@ -7,9 +7,12 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
-    const sessions = getStore().listSessions(id)
-    return ok({ sessions: sessions.map((s) => ({ id: s.id, title: s.title, status: s.status, createdAt: s.created_at })) })
+    const store = getStore()
+    await store.requireProjectForOwner(id, user.id)
+    const sessions = await store.listSessions(id)
+    return ok({
+      sessions: sessions.map((s) => ({ id: s.id, title: s.title, status: s.status, createdAt: s.created_at })),
+    })
   })
 }
 
@@ -17,9 +20,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   return route(async () => {
     const user = await requireUser()
     const { id } = await ctx.params
-    getStore().requireProjectForOwner(id, user.id)
+    const store = getStore()
+    await store.requireProjectForOwner(id, user.id)
     const body = await readJson<{ title?: string }>(req)
-    const session = getStore().createSession({ projectId: id, title: (body.title ?? '').trim() || '新会话' })
+    const session = await store.createSession({
+      projectId: id,
+      title: (body.title ?? '').trim() || '新会话',
+    })
     return ok({ session: { id: session.id, title: session.title } }, { status: 201 })
   })
 }

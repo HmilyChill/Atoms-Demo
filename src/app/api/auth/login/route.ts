@@ -20,7 +20,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       throw new AppError('BAD_REQUEST', '请填写邮箱与密码', '两者均为必填')
     }
 
-    const user = getStore().findUserByEmail(email)
+    const user = await getStore().findUserByEmail(email)
     // 统一错误信息：不区分「用户不存在」与「密码错误」，避免账号枚举
     if (!user || !verifyPassword(password, user.password_hash)) {
       throw new AppError('UNAUTHORIZED', '邮箱或密码不正确', '请检查后重试，或先注册新账号')

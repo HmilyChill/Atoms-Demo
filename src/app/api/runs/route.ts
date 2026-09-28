@@ -31,7 +31,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (!projectId) throw new AppError('BAD_REQUEST', '缺少项目 id', '请从项目页发起生成')
 
     const store = getStore()
-    store.requireProjectForOwner(projectId, user.id)
+    await store.requireProjectForOwner(projectId, user.id)
 
     const userInput = (body.userInput ?? '').trim()
     if (userInput.length === 0) {
@@ -47,24 +47,24 @@ export async function POST(req: NextRequest): Promise<Response> {
 
     let sessionId = (body.sessionId ?? '').trim()
     if (sessionId) {
-      const session = store.getSession(sessionId)
+      const session = await store.getSession(sessionId)
       if (!session || session.project_id !== projectId) {
         throw new AppError('NOT_FOUND', '会话不存在', '请刷新页面后重试')
       }
     } else {
-      const sessions = store.listSessions(projectId)
-      sessionId = sessions[0]?.id ?? store.createSession({ projectId }).id
+      const sessions = await store.listSessions(projectId)
+      sessionId = sessions[0]?.id ?? (await store.createSession({ projectId })).id
     }
 
-    const active = store.findActiveRunBySession(sessionId)
+    const active = await store.findActiveRunBySession(sessionId)
     if (active) {
       throw new AppError('CONFLICT', '该会话已有正在进行的生成任务', '请先等待其完成或取消后再发起新的生成')
     }
 
-    const hasSpec = store.getLatestSpecVersion(projectId) !== null
+    const hasSpec = (await store.getLatestSpecVersion(projectId)) !== null
     const mode: 'create' | 'iterate' = body.mode ?? (hasSpec ? 'iterate' : 'create')
 
-    const run = createRun({
+    const run = await createRun({
       projectId,
       sessionId,
       userInput,
