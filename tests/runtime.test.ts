@@ -66,6 +66,14 @@ function boot(spec: AppSpec, adapter: unknown, options: Record<string, unknown> 
   })
   const { window } = dom
   const errors: Array<{ scope: string; message: string }> = []
+  /** 宿主收到的消息（运行时只在 parent !== self 时才发送，因此需要给窗口装一个 parent 替身） */
+  const messages: Array<{ source: string; type: string; payload: Record<string, unknown> }> = []
+  Object.defineProperty(window, 'parent', {
+    value: { postMessage: (m: unknown) => messages.push(m as never) },
+    configurable: true,
+    writable: true,
+  })
+
   window.eval(RUNTIME_SOURCE)
 
   const runtime = (window as unknown as { AtomsRuntime: { renderApp: (r: HTMLElement, s: AppSpec, o: Record<string, unknown>) => { destroy: () => void } } })
@@ -76,10 +84,11 @@ function boot(spec: AppSpec, adapter: unknown, options: Record<string, unknown> 
   const app = runtime.renderApp(root, spec, {
     dataAdapter: adapter,
     readOnly: Boolean(options.readOnly),
+    selectable: options.selectable,
     onError: (e: { scope: string; message: string }) => errors.push(e),
   })
 
-  return { dom, window, document: window.document, root, app, errors }
+  return { dom, window, document: window.document, root, app, errors, messages }
 }
 
 /** 等待运行时内部的 Promise 链（loadAll → paint）完成 */
@@ -276,8 +285,7 @@ test('渲染运行时：只读模式下隐藏表单与操作按钮', async () =>
   assert.equal(document.querySelectorAll('.atoms-table tbody tr').length, 1, '只读模式仍应显示数据')
 })
 
-test('渲染运行时：标签页组件可切换', async () => {
-  const base = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+test('渲染运行时：标签页组件可切换', async () => {  const base = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
   const spec: AppSpec = {
     ...base,
     pages: [
@@ -311,4 +319,85 @@ test('渲染运行时：标签页组件可切换', async () => {
   await flush()
 
   assert.ok(document.body.textContent?.includes('这是第二个页签的内容'), '切换后应显示第二个页签内容')
+})
+
+// ─────────── 选中元素定向修改 ───────────
+
+function findButton(document: Document, text: string): HTMLButtonElement | undefined {
+  return (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[]).find((b) =>
+    b.textContent?.includes(text),
+  )
+}
+
+test('选中元素：每个组件都带可定位标记', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const mem = createMemoryAdapter({ tasks: [] })
+  const { document } = boot(spec, mem.adapter)
+  await flush()
+
+  const tagged = document.querySelectorAll('[data-atoms-component]')
+  assert.equal(
+    tagged.length,
+    spec.pages[0].components.length,
+    '每个顶层组件都应有 data-atoms-component 标记',
+  )
+  assert.ok(document.querySelector('[data-atoms-type="table"]'), '应能按类型定位到表格组件')
+})
+
+test('选中元素：开启选择模式后点击组件会把该元素回传宿主', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const mem = createMemoryAdapter({ tasks: [] })
+  const { document, messages } = boot(spec, mem.adapter)
+  await flush()
+
+  const selectButton = findButton(document, '选择元素')
+  assert.ok(selectButton, '应提供「选择元素」按钮')
+  selectButton.click()
+  await flush(2)
+
+  const table = document.querySelector('[data-atoms-type="table"]') as HTMLElement
+  assert.ok(table, '应存在表格组件')
+  table.click()
+  await flush(2)
+
+  const selected = messages.find((m) => m.type === 'element-selected')
+  assert.ok(selected, `应回传 element-selected，实际消息：${JSON.stringify(messages.map((m) => m.type))}`)
+  assert.equal(selected.source, 'atoms-preview')
+  assert.equal(selected.payload.componentType, 'table', '应带上组件类型')
+  assert.equal(typeof selected.payload.componentId, 'string', '应带上组件 id')
+  assert.equal(selected.payload.summary, '表格', '应给出可读的组件名称')
+})
+
+test('选中元素：未开启选择模式时点击不会回传（不干扰正常操作）', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const mem = createMemoryAdapter({ tasks: [{ id: 'x1', title: '正常操作', done: false }] })
+  const { document, messages } = boot(spec, mem.adapter)
+  await flush()
+
+  const table = document.querySelector('[data-atoms-type="table"]') as HTMLElement
+  table.click()
+  await flush(2)
+
+  assert.equal(
+    messages.some((m) => m.type === 'element-selected'),
+    false,
+    '非选择模式下不应回传元素选中',
+  )
+})
+
+test('选中元素：只读分享模式不提供「选择元素」（来访者无法回到工作台修改）', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const mem = createMemoryAdapter({ tasks: [] })
+  const { document } = boot(spec, mem.adapter, { readOnly: true })
+  await flush()
+
+  assert.equal(findButton(document, '选择元素'), undefined, '只读模式不应出现选择元素按钮')
+})
+
+test('选中元素：显式关闭 selectable 时也不出现该按钮', async () => {
+  const spec = buildTemplateSpec(analyzeRequirement(S1), FIXED_TIME)
+  const mem = createMemoryAdapter({ tasks: [] })
+  const { document } = boot(spec, mem.adapter, { selectable: false })
+  await flush()
+  assert.equal(findButton(document, '选择元素'), undefined)
 })

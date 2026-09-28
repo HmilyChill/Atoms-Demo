@@ -55,6 +55,8 @@ export function PreviewHost({
           projectId,
           token,
           readOnly,
+          // 只读（分享）模式下关闭"选择元素"：来访者无法回到工作台继续修改
+          selectable: !readOnly,
           onError: (e: { scope: string; message: string }) => {
             try {
               window.parent?.postMessage({ source: 'atoms-preview-host', type: 'error', payload: e }, '*')

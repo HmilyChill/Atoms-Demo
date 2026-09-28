@@ -256,6 +256,8 @@
     '.atoms-list .item .t{font-size:14px;font-weight:560}',
     '.atoms-list .item .s{font-size:12px;color:#64748b}',
     '.atoms-chart{width:100%;height:auto;display:block}',
+    '.atoms-select-mode [data-atoms-component]{cursor:crosshair;outline:1px dashed #c7d2fe;outline-offset:1px}',
+    '.atoms-select-mode [data-atoms-component]:hover{outline:2px dashed var(--atoms-primary);outline-offset:2px;background:rgba(99,102,241,.06)}',
   ].join('\n')
 
   function ensureStyle(doc) {
@@ -283,6 +285,8 @@
       })
 
     var readOnly = !!options.readOnly
+    /** 只读（分享）模式下不提供"选择元素"，因为无法回到工作台继续修改 */
+    var selectable = options.selectable !== false && !readOnly
     var onError =
       options.onError ||
       function () {
@@ -300,6 +304,8 @@
       selected: {},
       /** 顶部反馈条（必须跨 paint() 存活，否则"保存成功"会被列表刷新吞掉） */
       flash: null,
+      /** 选中元素模式（Atoms 的招牌交互：点界面 → 定向修改） */
+      selectMode: false,
     }
 
     root.classList.add('atoms-root')
@@ -396,7 +402,7 @@
 
     // ── 组件渲染 ──
 
-    function renderComponent(c) {
+    function renderComponentInner(c) {
       switch (c.type) {
         case 'heading':
           return el('h2', { class: 'atoms-h1', text: c.text || '' })
@@ -428,6 +434,16 @@
           return box
         }
       }
+    }
+
+    /** 统一给每个组件打上标记，供"选中元素定向修改"定位 */
+    function renderComponent(c) {
+      var node = renderComponentInner(c)
+      if (node && node.setAttribute) {
+        node.setAttribute('data-atoms-component', c.id)
+        node.setAttribute('data-atoms-type', c.type)
+      }
+      return node
     }
 
     function card(title, body, extraClass) {
@@ -954,8 +970,21 @@
       var head = el('header', { class: 'atoms-head' }, [
         el('h1', { class: 'atoms-title', text: (spec.meta && spec.meta.name) || '生成的应用' }),
         el('span', { class: 'atoms-badge', text: readOnly ? '只读分享' : '运行中 · 数据实时持久化' }),
+        selectable
+          ? el('button', {
+              class: 'atoms-btn ghost sm',
+              type: 'button',
+              text: state.selectMode ? '退出选择' : '选择元素',
+              title: '开启后点击界面上的任意组件，即可针对它提出修改',
+              onclick: function () {
+                state.selectMode = !state.selectMode
+                paint()
+              },
+            })
+          : null,
         nav,
       ])
+      root.classList.toggle('atoms-select-mode', state.selectMode)
       root.appendChild(head)
 
       var body = el('main', { class: 'atoms-body' })
@@ -1013,6 +1042,56 @@
     }
     global.addEventListener('error', onWinError)
     global.addEventListener('unhandledrejection', onRejection)
+
+    // ── 选中元素定向修改（Atoms 的招牌交互）──
+    // 开启选择模式后，点击任意组件会把它标记回传宿主；
+    // 宿主据此生成一条"针对该元素"的修改诉求，再走正常的迭代流程。
+    function describeComponent(type) {
+      var names = {
+        form: '表单',
+        table: '表格',
+        list: '列表',
+        detail: '详情',
+        stats: '统计卡片',
+        chart: '图表',
+        filter: '筛选器',
+        heading: '标题',
+        text: '文本',
+        callout: '提示',
+        tabs: '标签页',
+      }
+      return names[type] || String(type)
+    }
+
+    function closestComponent(node) {
+      var cur = node
+      while (cur && cur !== root) {
+        if (cur.getAttribute && cur.getAttribute('data-atoms-component')) return cur
+        cur = cur.parentNode
+      }
+      return null
+    }
+
+    root.addEventListener(
+      'click',
+      function (event) {
+        if (!state.selectMode) return
+        var hit = closestComponent(event.target)
+        if (!hit) return
+        // 选择模式下拦截点击，避免误触发表单提交/删除等真实操作
+        event.preventDefault()
+        event.stopPropagation()
+        var page = currentPage()
+        notify('element-selected', {
+          componentId: hit.getAttribute('data-atoms-component'),
+          componentType: hit.getAttribute('data-atoms-type'),
+          pageId: state.pageId,
+          pageTitle: page ? page.title : '',
+          summary: describeComponent(hit.getAttribute('data-atoms-type')),
+        })
+      },
+      true,
+    )
 
     // 宿主 → 预览 的消息协议
     var onMessage = function (event) {

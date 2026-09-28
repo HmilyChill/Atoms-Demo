@@ -141,6 +141,13 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
   const [busy, setBusy] = useState(false)
   const [shareUrl, setShareUrl] = useState('')
   const [previewError, setPreviewError] = useState('')
+  /** 用户从预览里点选的元素（用于生成一条"针对该元素"的修改诉求） */
+  const [selectedElement, setSelectedElement] = useState<{
+    componentId: string
+    componentType: string
+    summary: string
+    pageTitle: string
+  } | null>(null)
 
   const drivingRef = useRef(false)
   const esRef = useRef<EventSource | null>(null)
@@ -181,13 +188,36 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
     void loadPreviewToken()
   }, [loadSpec, loadPreviewToken])
 
-  // 预览 iframe 内运行时上报的错误（错误必须可见，不能静默白屏）
+  // 预览 iframe 内运行时的上报：错误必须可见（不能静默白屏）；元素选中用于定向修改
   useEffect(() => {
     function onMessage(event: MessageEvent) {
-      const data = event.data as { source?: string; type?: string; payload?: { scope?: string; message?: string } }
+      const data = event.data as {
+        source?: string
+        type?: string
+        payload?: Record<string, unknown>
+      }
       if (data?.source !== 'atoms-preview' && data?.source !== 'atoms-preview-host') return
+
       if (data.type === 'error' && data.payload) {
-        setPreviewError(`${data.payload.scope ?? '预览'}：${data.payload.message ?? ''}`)
+        const p = data.payload as { scope?: string; message?: string }
+        setPreviewError(`${p.scope ?? '预览'}：${p.message ?? ''}`)
+      }
+
+      if (data.type === 'element-selected' && data.payload) {
+        const p = data.payload as {
+          componentId?: string
+          componentType?: string
+          summary?: string
+          pageTitle?: string
+        }
+        setSelectedElement({
+          componentId: String(p.componentId ?? ''),
+          componentType: String(p.componentType ?? ''),
+          summary: String(p.summary ?? '组件'),
+          pageTitle: String(p.pageTitle ?? ''),
+        })
+        // 预填一条指向性诉求，用户补全后半句即可提交（走正常迭代流程）
+        setInput(`把${p.pageTitle ? `「${p.pageTitle}」里的` : ''}${p.summary ?? '这个组件'}改为：`)
       }
     }
     window.addEventListener('message', onMessage)
@@ -558,6 +588,21 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
             <label className="mb-1 block text-xs font-medium text-slate-600">
               {spec ? '继续迭代这个应用' : '描述你想要的应用'}
             </label>
+            {selectedElement && (
+              <div className="mb-2 flex flex-wrap items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] text-indigo-800">
+                <span>
+                  已选中：{selectedElement.summary}
+                  {selectedElement.pageTitle ? `（页面：${selectedElement.pageTitle}）` : ''}
+                </span>
+                <span className="text-indigo-500">补全后半句，提交即可定向修改</span>
+                <button
+                  onClick={() => setSelectedElement(null)}
+                  className="ml-auto text-indigo-600 hover:underline"
+                >
+                  取消选择
+                </button>
+              </div>
+            )}
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}

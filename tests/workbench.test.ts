@@ -489,6 +489,44 @@ test('工作台：非预览来源的消息不应触发错误横幅', async () =>
   assert.equal(container().textContent?.includes('预览内捕获到运行时错误'), false, '不应被无关消息干扰')
 })
 
+test('工作台：从预览点选元素后，输入框预填一条指向性修改诉求（点选式迭代）', async () => {
+  await mount()
+
+  await React.act(async () => {
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: {
+          source: 'atoms-preview',
+          type: 'element-selected',
+          payload: {
+            componentId: 'tasks--c-table',
+            componentType: 'table',
+            summary: '表格',
+            pageTitle: '任务清单',
+          },
+        },
+      }),
+    )
+    await flush(6)
+  })
+
+  const textarea = container().querySelector('textarea') as HTMLTextAreaElement
+  assert.ok(textarea.value.includes('表格'), `输入框应预填诉求，实际："${textarea.value}"`)
+  assert.ok(textarea.value.includes('任务清单'), '预填内容应带上所在页面')
+  assert.ok(textarea.value.trim().endsWith('改为：'), '应留出补全位置')
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('已选中：表格'), '应显示已选中提示')
+  assert.ok(text.includes('取消选择'), '应可取消选择')
+
+  // 取消后提示消失
+  await React.act(async () => {
+    findButton('取消选择')?.click()
+    await flush(4)
+  })
+  assert.equal(container().textContent?.includes('已选中：'), false, '取消后不应再显示已选中提示')
+})
+
 test('工作台：空需求不会被提交（客户端就拦住，不浪费一次生成额度）', async () => {
   await mount()
   await React.act(async () => {
