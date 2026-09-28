@@ -189,3 +189,61 @@ test('增量修改：请求图表时自动补齐数值字段（看板类需求�
   assert.equal(yField?.type, 'number')
   assert.equal(validateSpec(result.spec).ok, true)
 })
+
+// ─────────── 模板覆盖（含后续新增的模板）───────────
+
+const EXTRA_SAMPLES: Array<{ name: string; req: string; kind: string }> = [
+  {
+    name: '库存管理',
+    req: '做一个库存管理工具：登记物料入库，查看库存台账与分类汇总图表。',
+    kind: 'inventory',
+  },
+  {
+    name: '内容管理',
+    req: '做一个内容管理系统：新建文章、按状态筛选、发布或退回草稿。',
+    kind: 'content',
+  },
+  {
+    name: '预约管理',
+    req: '做一个会议室预约系统：提交预约，管理员确认或取消，按资源筛选。',
+    kind: 'booking',
+  },
+]
+
+test('模板覆盖：每个模板都能识别正确、Spec 合法、且通过自身契约', () => {
+  for (const sample of EXTRA_SAMPLES) {
+    const analysis = analyzeRequirement(sample.req)
+    assert.equal(analysis.kind, sample.kind, `${sample.name} 应识别为 ${sample.kind}（实际 ${analysis.kind}）`)
+
+    const spec = buildTemplateSpec(analysis, FIXED_TIME)
+    const validation = validateSpec(spec)
+    assert.equal(validation.ok, true, `${sample.name} 的 Spec 应合法：${JSON.stringify(validation.issues)}`)
+
+    // 组件 id 必须全局唯一，否则渲染冒烟会判为问题
+    const contract = buildContract(analysis)
+    const report = verifySpec(spec, contract)
+    assert.equal(report.ok, true, `${sample.name} 应通过自身契约：${report.summary}`)
+  }
+})
+
+test('模板覆盖：所有模板产出的组件 id 都全局唯一', () => {
+  const allRequests = [
+    '做一个个人待办清单：能新增任务、标记完成、按状态筛选、删除。',
+    '做一个活动报名与审批系统：学生提交报名，管理员审批通过或驳回。',
+    '做一个销售记录工具：录入每日销售额与产品，用图表展示汇总趋势。',
+    ...EXTRA_SAMPLES.map((s) => s.req),
+    '做一个数据管理工具。',
+  ]
+  for (const req of allRequests) {
+    const spec = buildTemplateSpec(analyzeRequirement(req), FIXED_TIME)
+    const ids = spec.pages.flatMap((p) => p.components.map((c) => c.id))
+    assert.equal(new Set(ids).size, ids.length, `「${req}」的组件 id 出现重复：${JSON.stringify(ids)}`)
+  }
+})
+
+test('模板优先级：报名归入审批流、预约归入预约模板（避免关键词互相抢）', () => {
+  assert.equal(analyzeRequirement('做一个活动报名系统，管理员审批通过或驳回').kind, 'approval')
+  assert.equal(analyzeRequirement('做一个会议室预约系统，按时段登记占用').kind, 'booking')
+  // 库存里的"采购"不应被当成审批（没有审批关键词）
+  assert.equal(analyzeRequirement('做一个物料采购与库存台账').kind, 'inventory')
+})

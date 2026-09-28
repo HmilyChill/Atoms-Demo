@@ -16,7 +16,7 @@ import type {
 import { DEFAULT_THEME, SPEC_SCHEMA_VERSION } from '@/lib/spec/types'
 import type { Contract } from '@/lib/spec/contract'
 
-export type TemplateKind = 'tasks' | 'approval' | 'dashboard' | 'generic'
+export type TemplateKind = 'tasks' | 'approval' | 'dashboard' | 'inventory' | 'content' | 'booking' | 'generic'
 
 export interface RequirementAnalysis {
   kind: TemplateKind
@@ -47,12 +47,18 @@ const KEYWORDS: Record<Exclude<TemplateKind, 'generic'>, string[]> = {
   approval: ['审批', '审核', '申请', '报名', '驳回', '通过', '流转', '工单'],
   tasks: ['待办', '任务', 'todo', '清单', '打卡', '事项'],
   dashboard: ['销售', '看板', '统计', '图表', '报表', '趋势', '汇总', '分析', '数据'],
+  inventory: ['库存', '进销存', '出入库', '入库', '出库', '仓库', '盘点', '采购', '物料'],
+  content: ['文章', '内容', '博客', '笔记', '知识库', '文档管理', '发布稿', '选题'],
+  booking: ['预约', '排班', '时段', '档期', '会议室', '挂号', '订场'],
 }
 
 const DEFAULT_TITLES: Record<TemplateKind, string> = {
   tasks: '任务清单',
   approval: '报名审批系统',
   dashboard: '数据看板',
+  inventory: '库存管理',
+  content: '内容管理',
+  booking: '预约管理',
   generic: '数据管理应用',
 }
 
@@ -60,6 +66,9 @@ const DEFAULT_ENTITY_LABELS: Record<TemplateKind, string> = {
   tasks: '任务',
   approval: '报名记录',
   dashboard: '销售记录',
+  inventory: '物料',
+  content: '内容',
+  booking: '预约',
   generic: '记录',
 }
 
@@ -67,8 +76,14 @@ const DEFAULT_COLLECTIONS: Record<TemplateKind, string> = {
   tasks: 'tasks',
   approval: 'applications',
   dashboard: 'sales',
+  inventory: 'materials',
+  content: 'articles',
+  booking: 'bookings',
   generic: 'items',
 }
+
+/** 关键词优先级（越靠前越先匹配；approval 在 booking 之前，因为"活动报名"应归入审批流） */
+const KIND_PRIORITY = ['approval', 'booking', 'inventory', 'content', 'tasks', 'dashboard'] as const
 
 /** 从自然语言需求中抽取确定性特征（关键词驱动，无随机性） */
 export function analyzeRequirement(input: string): RequirementAnalysis {
@@ -76,7 +91,7 @@ export function analyzeRequirement(input: string): RequirementAnalysis {
   const lower = raw.toLowerCase()
 
   let kind: TemplateKind = 'generic'
-  for (const key of ['approval', 'tasks', 'dashboard'] as const) {
+  for (const key of KIND_PRIORITY) {
     if (KEYWORDS[key].some((k) => lower.includes(k.toLowerCase()))) {
       kind = key
       break
@@ -165,6 +180,98 @@ function genericModels(analysis: RequirementAnalysis): SpecDataModel[] {
   ]
 }
 
+function inventoryModels(): SpecDataModel[] {
+  return [
+    {
+      name: 'materials',
+      label: '物料',
+      fields: [
+        { name: 'name', label: '物料名称', type: 'string', required: true, inList: true },
+        { name: 'sku', label: '编码', type: 'string', inList: true },
+        { name: 'quantity', label: '当前库存', type: 'number', required: true, inList: true },
+        { name: 'safetyStock', label: '安全库存', type: 'number', inList: true },
+        {
+          name: 'category',
+          label: '分类',
+          type: 'select',
+          options: ['电子', '办公', '耗材'],
+          defaultValue: '耗材',
+          inList: true,
+        },
+        { name: 'checkedAt', label: '盘点日期', type: 'date', inList: true },
+      ],
+    },
+  ]
+}
+
+function contentModels(): SpecDataModel[] {
+  return [
+    {
+      name: 'articles',
+      label: '内容',
+      fields: [
+        { name: 'title', label: '标题', type: 'string', required: true, inList: true },
+        {
+          name: 'category',
+          label: '栏目',
+          type: 'select',
+          options: ['技术', '产品', '随笔'],
+          defaultValue: '技术',
+          inList: true,
+        },
+        { name: 'author', label: '作者', type: 'string', inList: true },
+        { name: 'summary', label: '摘要', type: 'text' },
+        {
+          name: 'status',
+          label: '状态',
+          type: 'select',
+          options: ['草稿', '已发布'],
+          defaultValue: '草稿',
+          inList: true,
+        },
+        { name: 'publishedAt', label: '发布时间', type: 'date', inList: true },
+      ],
+    },
+  ]
+}
+
+function bookingModels(): SpecDataModel[] {
+  return [
+    {
+      name: 'bookings',
+      label: '预约',
+      fields: [
+        { name: 'customer', label: '预约人', type: 'string', required: true, inList: true },
+        {
+          name: 'resource',
+          label: '资源',
+          type: 'select',
+          options: ['会议室 A', '会议室 B', '研讨室'],
+          defaultValue: '会议室 A',
+          inList: true,
+        },
+        { name: 'date', label: '日期', type: 'date', required: true, inList: true },
+        {
+          name: 'slot',
+          label: '时段',
+          type: 'select',
+          options: ['09:00-11:00', '11:00-13:00', '14:00-16:00', '16:00-18:00'],
+          defaultValue: '09:00-11:00',
+          inList: true,
+        },
+        {
+          name: 'status',
+          label: '状态',
+          type: 'select',
+          options: ['待确认', '已确认', '已取消'],
+          defaultValue: '待确认',
+          inList: true,
+        },
+      ],
+    },
+  ]
+}
+
 export function buildDataModels(analysis: RequirementAnalysis): SpecDataModel[] {
   switch (analysis.kind) {
     case 'tasks':
@@ -173,6 +280,12 @@ export function buildDataModels(analysis: RequirementAnalysis): SpecDataModel[] 
       return approvalModels()
     case 'dashboard':
       return dashboardModels()
+    case 'inventory':
+      return inventoryModels()
+    case 'content':
+      return contentModels()
+    case 'booking':
+      return bookingModels()
     default:
       return genericModels(analysis)
   }
@@ -351,6 +464,174 @@ function genericPages(analysis: RequirementAnalysis): SpecPage[] {
   ]
 }
 
+function inventoryPages(): SpecPage[] {
+  return [
+    {
+      id: 'stock',
+      title: '库存台账',
+      layout: 'single',
+      components: [
+        { id: 'c-heading', type: 'heading', text: '库存台账' },
+        { id: 'c-stats-count', type: 'stats', model: 'materials', metric: 'count', title: '物料种类' },
+        { id: 'c-stats-sum', type: 'stats', model: 'materials', metric: 'sum', metricField: 'quantity', title: '库存总量' },
+        { id: 'c-filter', type: 'filter', model: 'materials', filterField: 'category', title: '按分类筛选' },
+        {
+          id: 'c-form',
+          type: 'form',
+          model: 'materials',
+          title: '新增物料',
+          fields: ['name', 'sku', 'quantity', 'safetyStock', 'category', 'checkedAt'],
+          submitLabel: '入库登记',
+          action: { kind: 'create', label: '入库登记', model: 'materials' },
+        },
+        {
+          id: 'c-table',
+          type: 'table',
+          model: 'materials',
+          title: '全部物料',
+          columns: [
+            { field: 'name' },
+            { field: 'sku' },
+            { field: 'quantity' },
+            { field: 'safetyStock' },
+            { field: 'category' },
+          ],
+          rowActions: [{ kind: 'delete', label: '删除' }],
+        },
+      ],
+    },
+    {
+      id: 'overview',
+      title: '库存看板',
+      layout: 'dashboard',
+      components: [
+        { id: 'c-heading', type: 'heading', text: '库存看板' },
+        { id: 'c-stats', type: 'stats', model: 'materials', metric: 'sum', metricField: 'quantity', title: '库存总量' },
+        {
+          id: 'c-chart',
+          type: 'chart',
+          model: 'materials',
+          title: '各分类库存量',
+          chart: 'bar',
+          xField: 'category',
+          yField: 'quantity',
+          aggregate: 'sum',
+        },
+      ],
+    },
+  ]
+}
+
+function contentPages(): SpecPage[] {
+  return [
+    {
+      id: 'manage',
+      title: '内容管理',
+      layout: 'single',
+      components: [
+        { id: 'c-heading', type: 'heading', text: '内容管理' },
+        { id: 'c-stats', type: 'stats', model: 'articles', metric: 'count', title: '内容总数' },
+        { id: 'c-filter', type: 'filter', model: 'articles', filterField: 'status', title: '按状态筛选' },
+        {
+          id: 'c-form',
+          type: 'form',
+          model: 'articles',
+          title: '新建内容',
+          fields: ['title', 'category', 'author', 'summary', 'status', 'publishedAt'],
+          submitLabel: '保存内容',
+          action: { kind: 'create', label: '保存内容', model: 'articles' },
+        },
+        {
+          id: 'c-table',
+          type: 'table',
+          model: 'articles',
+          title: '内容列表',
+          columns: [
+            { field: 'title' },
+            { field: 'category' },
+            { field: 'author' },
+            { field: 'status' },
+            { field: 'publishedAt' },
+          ],
+          rowActions: [
+            { kind: 'status', label: '发布', field: 'status', value: '已发布' },
+            { kind: 'status', label: '退回草稿', field: 'status', value: '草稿' },
+            { kind: 'delete', label: '删除' },
+          ],
+        },
+      ],
+    },
+  ]
+}
+
+function bookingPages(): SpecPage[] {
+  return [
+    {
+      id: 'book',
+      title: '预约登记',
+      layout: 'single',
+      components: [
+        { id: 'c-heading', type: 'heading', text: '预约登记' },
+        { id: 'c-callout', type: 'callout', text: '提交后状态为「待确认」，管理员可在下方列表中确认或取消。' },
+        {
+          id: 'c-form',
+          type: 'form',
+          model: 'bookings',
+          title: '新建预约',
+          fields: ['customer', 'resource', 'date', 'slot'],
+          submitLabel: '提交预约',
+          action: { kind: 'create', label: '提交预约', model: 'bookings' },
+        },
+        {
+          id: 'c-table',
+          type: 'table',
+          model: 'bookings',
+          title: '我的预约',
+          columns: [
+            { field: 'customer' },
+            { field: 'resource' },
+            { field: 'date' },
+            { field: 'slot' },
+            { field: 'status' },
+          ],
+          rowActions: [
+            { kind: 'status', label: '确认', field: 'status', value: '已确认' },
+            { kind: 'status', label: '取消', field: 'status', value: '已取消' },
+            { kind: 'delete', label: '删除' },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'manage',
+      title: '预约管理',
+      layout: 'single',
+      components: [
+        { id: 'c-heading', type: 'heading', text: '预约管理' },
+        { id: 'c-stats', type: 'stats', model: 'bookings', metric: 'count', title: '预约总数' },
+        { id: 'c-filter', type: 'filter', model: 'bookings', filterField: 'resource', title: '按资源筛选' },
+        {
+          id: 'c-table',
+          type: 'table',
+          model: 'bookings',
+          title: '全部预约',
+          columns: [
+            { field: 'customer' },
+            { field: 'resource' },
+            { field: 'date' },
+            { field: 'slot' },
+            { field: 'status' },
+          ],
+          rowActions: [
+            { kind: 'status', label: '确认', field: 'status', value: '已确认' },
+            { kind: 'status', label: '取消', field: 'status', value: '已取消' },
+          ],
+        },
+      ],
+    },
+  ]
+}
+
 export function buildPages(analysis: RequirementAnalysis): SpecPage[] {
   switch (analysis.kind) {
     case 'tasks':
@@ -359,6 +640,12 @@ export function buildPages(analysis: RequirementAnalysis): SpecPage[] {
       return approvalPages()
     case 'dashboard':
       return dashboardPages()
+    case 'inventory':
+      return inventoryPages()
+    case 'content':
+      return contentPages()
+    case 'booking':
+      return bookingPages()
     default:
       return genericPages(analysis)
   }
@@ -494,6 +781,57 @@ export function buildContract(analysis: RequirementAnalysis): Contract {
           '图表随录入的数据变化',
           '能看到记录总数',
           '刷新页面后，记录仍然存在',
+        ],
+      }
+    case 'inventory':
+      return {
+        mustDo: [
+          { id: 'md-1', text: '提供入库登记表单', check: { kind: 'component', type: 'form' } },
+          { id: 'md-2', text: '展示库存台账列表', check: { kind: 'component', type: 'table' } },
+          { id: 'md-3', text: '展示库存汇总', check: { kind: 'component', type: 'stats' } },
+          { id: 'md-4', text: '提供分类库存图表', check: { kind: 'component', type: 'chart' } },
+          { id: 'md-5', text: '库存量必须为数值型', check: { kind: 'fieldType', type: 'number' } },
+        ],
+        mustNot: [{ id: 'mn-1', text: '不新增需求之外的数据集合', check: { kind: 'maxModels', max: 1 } }],
+        acceptance: [
+          '能登记一条物料，并立即出现在台账中',
+          '库存总量随登记的数据变化',
+          '图表按分类汇总库存量',
+          '刷新页面后，物料与数量仍然存在',
+        ],
+      }
+    case 'content':
+      return {
+        mustDo: [
+          { id: 'md-1', text: '提供内容录入表单', check: { kind: 'component', type: 'form' } },
+          { id: 'md-2', text: '展示内容列表', check: { kind: 'component', type: 'table' } },
+          { id: 'md-3', text: '支持按状态筛选', check: { kind: 'component', type: 'filter' } },
+          { id: 'md-4', text: '支持发布 / 退回草稿', check: { kind: 'action', action: 'status' } },
+          { id: 'md-5', text: '支持删除内容', check: { kind: 'action', action: 'delete' } },
+        ],
+        mustNot: [{ id: 'mn-1', text: '不新增需求之外的数据集合', check: { kind: 'maxModels', max: 1 } }],
+        acceptance: [
+          '能新建一条内容，默认状态为「草稿」',
+          '能把内容改为「已发布」',
+          '能按状态筛选列表',
+          '刷新页面后，内容与状态仍然存在',
+        ],
+      }
+    case 'booking':
+      return {
+        mustDo: [
+          { id: 'md-1', text: '提供预约提交表单', check: { kind: 'component', type: 'form' } },
+          { id: 'md-2', text: '展示预约列表', check: { kind: 'component', type: 'table' } },
+          { id: 'md-3', text: '支持确认 / 取消预约', check: { kind: 'action', action: 'status' } },
+          { id: 'md-4', text: '支持按资源筛选', check: { kind: 'component', type: 'filter' } },
+          { id: 'md-5', text: '展示预约总数', check: { kind: 'component', type: 'stats' } },
+        ],
+        mustNot: [{ id: 'mn-1', text: '不新增需求之外的数据集合', check: { kind: 'maxModels', max: 1 } }],
+        acceptance: [
+          '能提交一条预约，状态默认为「待确认」',
+          '管理员可以确认预约',
+          '管理员可以取消预约',
+          '刷新页面后，预约与状态仍然存在',
         ],
       }
     default:

@@ -454,6 +454,41 @@ test('工作台：产物归约正确——计划与校验报告都能在对应�
   assert.ok(container().textContent?.includes('校验全部通过'), '校验报告页签应显示结论')
 })
 
+test('工作台：预览内运行时错误会回传到宿主并显示（绝不静默白屏）', async () => {
+  await mount()
+
+  // 模拟 iframe 内的渲染运行时通过 postMessage 上报错误
+  await React.act(async () => {
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: {
+          source: 'atoms-preview',
+          type: 'error',
+          payload: { scope: '渲染 table', message: '模拟的运行时错误' },
+        },
+      }),
+    )
+    await flush(6)
+  })
+
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('预览内捕获到运行时错误'), '宿主应显示错误横幅')
+  assert.ok(text.includes('模拟的运行时错误'), '横幅应包含真实错误信息与来源')
+})
+
+test('工作台：非预览来源的消息不应触发错误横幅', async () => {
+  await mount()
+  await React.act(async () => {
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: { source: 'some-extension', type: 'error', payload: { message: '无关消息' } },
+      }),
+    )
+    await flush(4)
+  })
+  assert.equal(container().textContent?.includes('预览内捕获到运行时错误'), false, '不应被无关消息干扰')
+})
+
 test('工作台：空需求不会被提交（客户端就拦住，不浪费一次生成额度）', async () => {
   await mount()
   await React.act(async () => {
