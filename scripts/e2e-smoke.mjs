@@ -242,7 +242,8 @@ const main = async () => {
   section('7. 迭代与版本回滚（M7）')
   const iterate = await api('/api/runs', {
     method: 'POST',
-    body: JSON.stringify({ projectId, userInput: '请增加一个优先级字段', autoConfirm: true }),
+    // 注意：tasks 模板本身已有 priority 字段，这里用确实不存在的「负责人」才能产生真实改动
+    body: JSON.stringify({ projectId, userInput: '请增加一个负责人字段', autoConfirm: true }),
   })
   check('有 Spec 后自动识别为 iterate 模式', iterate.body?.data?.mode === 'iterate')
   const iterRunId = iterate.body?.data?.runId
@@ -251,10 +252,27 @@ const main = async () => {
 
   const specV2Res = await api(`/api/projects/${projectId}/spec`)
   check('迭代产生 v2', specV2Res.body?.data?.version === 2, `version=${specV2Res.body?.data?.version}`)
-  const priorityField = (specV2Res.body?.data?.spec?.dataModels ?? [])
+  const ownerField = (specV2Res.body?.data?.spec?.dataModels ?? [])
     .flatMap((m) => m.fields ?? [])
-    .find((f) => f.name === 'priority')
-  check('增量修改落地了 priority 字段', !!priorityField)
+    .find((f) => f.name === 'owner')
+  check('增量修改落地了「负责人」字段', !!ownerField)
+
+  section('7.1 版本差异（M7 的可视化证据）')
+  const diff = await api(`/api/projects/${projectId}/diff?from=1&to=2`)
+  check('可对比两个版本的结构差异', diff.status === 200 && typeof diff.body?.data?.summary === 'string')
+  const diffPaths = (diff.body?.data?.changes ?? []).map((c) => c.path)
+  check('差异指出了新增的「负责人」字段', diffPaths.some((p) => p.includes('负责人')), JSON.stringify(diffPaths))
+  check(
+    '差异未包含无关变更（主题 / 导航 / 页面结构）—— 证明只动了目标片段',
+    !diffPaths.some((p) => p.startsWith('主题') || p === '导航' || p.startsWith('页面「')),
+    JSON.stringify(diffPaths),
+  )
+  check('每条差异都带可读中文描述', (diff.body?.data?.changes ?? []).every((c) => typeof c.description === 'string' && c.description.length > 0))
+
+  const diffNoFrom = await api(`/api/projects/${projectId}/diff`)
+  check('缺少 from 参数时返回 400', diffNoFrom.status === 400, `status=${diffNoFrom.status}`)
+  const diffBadVersion = await api(`/api/projects/${projectId}/diff?from=999`)
+  check('对比不存在的版本返回 404', diffBadVersion.status === 404, `status=${diffBadVersion.status}`)
 
   const stillThere = await api(`/api/projects/${projectId}/records/tasks`)
   check('迭代后生成物数据未丢失', (stillThere.body?.data?.records ?? []).length === 1)

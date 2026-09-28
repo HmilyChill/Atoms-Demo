@@ -37,6 +37,21 @@ interface VersionDto {
   isCurrent: boolean
 }
 
+interface DiffChangeDto {
+  path: string
+  kind: 'added' | 'removed' | 'changed'
+  before?: unknown
+  after?: unknown
+  description: string
+}
+
+interface DiffResultDto {
+  from: number
+  to: number
+  summary: string
+  changes: DiffChangeDto[]
+}
+
 interface VerificationDto {
   ok?: boolean
   summary?: string
@@ -116,6 +131,7 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
   const [artifacts, setArtifacts] = useState<ArtifactDto[]>([])
   const [spec, setSpec] = useState<SpecSummary | null>(null)
   const [versions, setVersions] = useState<VersionDto[]>([])
+  const [diff, setDiff] = useState<DiffResultDto | null>(null)
   const [verification, setVerification] = useState<VerificationDto | null>(null)
   const [previewToken, setPreviewToken] = useState('')
   const [previewKey, setPreviewKey] = useState(0)
@@ -355,8 +371,26 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
     [projectId, loadSpec, loadPreviewToken],
   )
 
-  const createShare = useCallback(async () => {
-    setBusy(true)
+  /** 加载"某版本 → 当前最新版"的结构差异，让"只改目标片段"这件事可见 */
+  const loadDiff = useCallback(
+    async (fromVersion: number) => {
+      setBusy(true)
+      setError('')
+      try {
+        const res = await fetch(`/api/projects/${projectId}/diff?from=${fromVersion}`, { cache: 'no-store' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(String(json?.error?.message ?? '加载差异失败'))
+        setDiff(json.data as DiffResultDto)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '加载差异失败')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [projectId],
+  )
+
+  const createShare = useCallback(async () => {    setBusy(true)
     try {
       const res = await fetch(`/api/projects/${projectId}/share`, { method: 'POST' })
       const json = await res.json()
@@ -897,6 +931,44 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
 
             {tab === 'versions' && (
               <div className="space-y-3">
+                {diff && (
+                  <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3">
+                    <div className="flex items-center gap-2 text-xs text-indigo-900">
+                      <span className="font-medium">
+                        版本差异 v{diff.from} → v{diff.to}
+                      </span>
+                      <span className="text-indigo-700">{diff.summary}</span>
+                      <button
+                        onClick={() => setDiff(null)}
+                        className="ml-auto rounded border border-indigo-300 px-2 py-0.5 text-[11px] text-indigo-700 hover:bg-white"
+                      >
+                        关闭
+                      </button>
+                    </div>
+                    {diff.changes.length === 0 ? (
+                      <div className="mt-2 text-[11px] text-indigo-800">两个版本结构完全一致</div>
+                    ) : (
+                      <ul className="mt-2 space-y-1">
+                        {diff.changes.map((c, i) => (
+                          <li key={i} className="text-[11px] text-indigo-900">
+                            <span
+                              className={
+                                c.kind === 'added'
+                                  ? 'mr-1 rounded bg-emerald-100 px-1 text-emerald-700'
+                                  : c.kind === 'removed'
+                                    ? 'mr-1 rounded bg-red-100 px-1 text-red-700'
+                                    : 'mr-1 rounded bg-amber-100 px-1 text-amber-800'
+                              }
+                            >
+                              {c.kind === 'added' ? '新增' : c.kind === 'removed' ? '移除' : '修改'}
+                            </span>
+                            {c.description.replace(/^(新增|移除|修改)：/, '')}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
                 {versions.length === 0 ? (
                   <Empty text="还没有任何版本" />
                 ) : (
@@ -919,6 +991,13 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
                             className="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
                           >
                             查看
+                          </button>
+                          <button
+                            onClick={() => void loadDiff(v.version)}
+                            disabled={busy}
+                            className="rounded border border-indigo-300 px-2 py-0.5 text-[11px] text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                          >
+                            与当前对比
                           </button>
                           <button
                             onClick={() => void rollback(v.version)}

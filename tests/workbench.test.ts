@@ -138,13 +138,43 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
 
   if (url.includes('/spec')) {
     return jsonResponse({
-      version: specAvailable ? 1 : null,
+      version: specAvailable ? 2 : null,
       spec: specAvailable ? SPEC : null,
-      changeSummary: specAvailable ? '生成' : '',
+      changeSummary: specAvailable ? '迭代' : '',
       versions: specAvailable
-        ? [{ version: 1, parentVersion: null, changeSummary: '生成', createdAt: FIXED_TIME, isCurrent: true }]
+        ? [
+            {
+              version: 2,
+              parentVersion: 1,
+              changeSummary: '增量修改：新增负责人字段',
+              createdAt: FIXED_TIME,
+              isCurrent: true,
+            },
+            { version: 1, parentVersion: null, changeSummary: '生成', createdAt: FIXED_TIME, isCurrent: false },
+          ]
         : [],
       verification: specAvailable ? ARTIFACTS[2].payload : null,
+    })
+  }
+  if (url.includes('/diff')) {
+    return jsonResponse({
+      from: 1,
+      to: 2,
+      summary: '新增 1 项 · 修改 1 项',
+      changes: [
+        {
+          path: '数据集合「任务」› 字段「负责人」',
+          kind: 'added',
+          description: '新增：数据集合「任务」› 字段「负责人」',
+        },
+        {
+          path: '主题 › primary',
+          kind: 'changed',
+          before: '#4f46e5',
+          after: '#0ea5e9',
+          description: '修改：主题 › primary（#4f46e5 → #0ea5e9）',
+        },
+      ],
     })
   }
   if (url.includes('/preview-token')) {
@@ -435,7 +465,7 @@ test('工作台：空需求不会被提交（客户端就拦住，不浪费一�
   assert.ok(container().textContent?.includes('请先描述你想要的应用'), '应就地给出提示')
 })
 
-test('工作台：版本页签显示版本列表，当前版本不提供回滚按钮', async () => {
+test('工作台：版本页签区分当前/历史版本，历史版本才提供回滚与对比', async () => {
   await mount()
   const versionTab = findButton('版本与迭代')
   assert.ok(versionTab, '应存在版本与迭代页签')
@@ -445,7 +475,31 @@ test('工作台：版本页签显示版本列表，当前版本不提供回滚�
   })
 
   const text = container().textContent ?? ''
-  assert.ok(text.includes('v1'), '应显示版本号')
+  assert.ok(text.includes('v1') && text.includes('v2'), '应显示两个版本')
   assert.ok(text.includes('当前'), '应标注当前版本')
-  assert.equal(findButton('回滚到此版本'), null, '当前版本不应提供回滚按钮')
+  assert.ok(text.includes('增量修改：新增负责人字段'), '应显示版本变更说明')
+
+  // 历史版本提供回滚与对比入口
+  assert.ok(findButton('回滚到此版本'), '历史版本应提供回滚入口')
+  assert.ok(findButton('与当前对比'), '历史版本应提供差异对比入口')
+})
+
+test('工作台：点击「与当前对比」会拉取并展示结构差异（让"只改目标片段"可见）', async () => {
+  await mount()
+  await React.act(async () => {
+    findButton('版本与迭代')?.click()
+    await flush(4)
+  })
+
+  await React.act(async () => {
+    findButton('与当前对比')?.click()
+    await flush(12)
+  })
+
+  assert.ok(callsTo('/diff').length > 0, '应请求差异接口')
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('版本差异 v1 → v2'), '应显示对比区间')
+  assert.ok(text.includes('新增 1 项 · 修改 1 项'), '应显示变更摘要')
+  assert.ok(text.includes('负责人'), '应列出新增的字段')
+  assert.ok(text.includes('主题 › primary'), '应列出被修改的主题项')
 })
