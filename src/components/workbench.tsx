@@ -52,6 +52,20 @@ interface DiffResultDto {
   changes: DiffChangeDto[]
 }
 
+/** 契约编辑草稿（M3 F-M3-3：用户可在确认前纠偏） */
+interface ContractDraftItem {
+  id: string
+  text: string
+  enabled: boolean
+}
+
+interface ContractDraft {
+  mustDo: ContractDraftItem[]
+  mustNot: ContractDraftItem[]
+  /** 一行一条验收点 */
+  acceptance: string
+}
+
 interface VerificationDto {
   ok?: boolean
   summary?: string
@@ -132,6 +146,9 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
   const [spec, setSpec] = useState<SpecSummary | null>(null)
   const [versions, setVersions] = useState<VersionDto[]>([])
   const [diff, setDiff] = useState<DiffResultDto | null>(null)
+  const [contractDraft, setContractDraft] = useState<ContractDraft | null>(null)
+  /** 待二次确认的回滚版本（TST-M7-4：回滚是不可逆操作，必须确认） */
+  const [pendingRollback, setPendingRollback] = useState<number | null>(null)
   const [verification, setVerification] = useState<VerificationDto | null>(null)
   const [previewToken, setPreviewToken] = useState('')
   const [previewKey, setPreviewKey] = useState(0)
@@ -419,6 +436,36 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
     },
     [projectId],
   )
+
+  /** 保存修订后的契约：会作为新的契约产物写入，后续校验按新契约执行（"重新锁定"） */
+  const saveContract = useCallback(async () => {
+    if (!run || !contractDraft) return
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/runs/${run.id}/contract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mustDo: contractDraft.mustDo.map((i) => ({ id: i.id, text: i.text, enabled: i.enabled })),
+          mustNot: contractDraft.mustNot.map((i) => ({ id: i.id, text: i.text, enabled: i.enabled })),
+          acceptance: contractDraft.acceptance
+            .split('\n')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(String(json?.error?.message ?? '保存契约失败'))
+      setContractDraft(null)
+      setNotice('契约已更新并重新锁定：后续校验将按新契约逐条执行')
+      await loadArtifacts(run.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存契约失败')
+    } finally {
+      setBusy(false)
+    }
+  }, [run, contractDraft, loadArtifacts])
 
   const createShare = useCallback(async () => {    setBusy(true)
     try {
@@ -777,8 +824,112 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
 
             {tab === 'contract' && (
               <div className="space-y-4">
-                {contract ? (
+                {contractDraft ? (
+                  <div className="space-y-4">
+                    <div className="rounded border border-indigo-200 bg-indigo-50 px-2.5 py-2 text-[11px] text-indigo-800">
+                      契约是生成前唯一的"需求锁"。你可以改文字、关掉不想要的约束、编辑验收点；
+                      保存后**后续校验会按新契约逐条执行**。
+                      带勾选的条目保留了原有的机检断言，改文字不会让校验失真；
+                      新增要求请写进「验收点」（它会如实呈现，但不会被伪装成已通过机检）。
+                    </div>
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-emerald-700">必做项</div>
+                      <ul className="space-y-1">
+                        {contractDraft.mustDo.map((m, i) => (
+                          <li key={m.id} className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={m.enabled}
+                              onChange={(e) => {
+                                const next = structuredClone(contractDraft)
+                                next.mustDo[i].enabled = e.target.checked
+                                setContractDraft(next)
+                              }}
+                            />
+                            <input
+                              value={m.text}
+                              onChange={(e) => {
+                                const next = structuredClone(contractDraft)
+                                next.mustDo[i].text = e.target.value
+                                setContractDraft(next)
+                              }}
+                              className="flex-1 rounded border border-slate-300 px-2 py-1 text-xs"
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-amber-700">禁做项</div>
+                      <ul className="space-y-1">
+                        {contractDraft.mustNot.map((m, i) => (
+                          <li key={m.id} className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={m.enabled}
+                              onChange={(e) => {
+                                const next = structuredClone(contractDraft)
+                                next.mustNot[i].enabled = e.target.checked
+                                setContractDraft(next)
+                              }}
+                            />
+                            <input
+                              value={m.text}
+                              onChange={(e) => {
+                                const next = structuredClone(contractDraft)
+                                next.mustNot[i].text = e.target.value
+                                setContractDraft(next)
+                              }}
+                              className="flex-1 rounded border border-slate-300 px-2 py-1 text-xs"
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-slate-600">验收点（一行一条）</div>
+                      <textarea
+                        value={contractDraft.acceptance}
+                        onChange={(e) => setContractDraft({ ...contractDraft, acceptance: e.target.value })}
+                        rows={5}
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => void saveContract()}
+                        disabled={busy}
+                        className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+                      >
+                        保存并重新锁定
+                      </button>
+                      <button
+                        onClick={() => setContractDraft(null)}
+                        className="rounded-md border border-slate-300 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : contract ? (
                   <>
+                    {awaiting && (
+                      <div className="flex items-center gap-2 rounded border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900">
+                        <span>生成尚未开始，你可以先修订契约再继续。</span>
+                        <button
+                          onClick={() =>
+                            setContractDraft({
+                              mustDo: (contract.mustDo ?? []).map((m) => ({ id: m.id, text: m.text, enabled: true })),
+                              mustNot: (contract.mustNot ?? []).map((m) => ({ id: m.id, text: m.text, enabled: true })),
+                              acceptance: (contract.acceptance ?? []).join('\n'),
+                            })
+                          }
+                          className="ml-auto rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] text-amber-800 hover:bg-amber-100"
+                        >
+                          编辑契约
+                        </button>
+                      </div>
+                    )}
                     <div>
                       <div className="mb-2 text-xs font-medium text-emerald-700">必做项（可机检）</div>
                       <ul className="space-y-1">
@@ -976,6 +1127,33 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
 
             {tab === 'versions' && (
               <div className="space-y-3">
+                {pendingRollback !== null && (
+                  <div className="flex flex-wrap items-center gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900">
+                    <span>
+                      确认回滚到 <strong>v{pendingRollback}</strong>？
+                      回滚会以**新版本**追加（历史版本不会被删除），生成物的数据也不会丢失。
+                    </span>
+                    <div className="ml-auto flex gap-2">
+                      <button
+                        onClick={() => {
+                          const target = pendingRollback
+                          setPendingRollback(null)
+                          void rollback(target)
+                        }}
+                        disabled={busy}
+                        className="rounded border border-amber-400 bg-white px-2 py-0.5 text-[11px] text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                      >
+                        确认回滚
+                      </button>
+                      <button
+                        onClick={() => setPendingRollback(null)}
+                        className="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:bg-white"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {diff && (
                   <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3">
                     <div className="flex items-center gap-2 text-xs text-indigo-900">
@@ -1045,7 +1223,7 @@ export function Workbench({ projectId, projectName }: { projectId: string; proje
                             与当前对比
                           </button>
                           <button
-                            onClick={() => void rollback(v.version)}
+                            onClick={() => setPendingRollback(v.version)}
                             disabled={busy}
                             className="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                           >

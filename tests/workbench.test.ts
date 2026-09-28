@@ -62,6 +62,8 @@ const calls: FetchCall[] = []
 let stepResponses: boolean[] = [true]
 /** 由各测试设置：项目是否已有 Spec（决定按钮是「开始生成」还是「提交迭代」） */
 let specAvailable = true
+/** 由各测试设置：是否停在"等待确认"Gate（用于测契约编辑） */
+let awaitingGate = false
 
 function jsonResponse(data: unknown): Response {
   return { ok: true, status: 200, json: async () => ({ data }) } as unknown as Response
@@ -183,12 +185,19 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
   if (/\/api\/runs$/.test(url) && method === 'POST') {
     return jsonResponse({ runId: 'run_wb_1', sessionId: 's1', mode: 'create', status: 'pending', stage: 'created' })
   }
+  if (url.includes('/contract') && method === 'POST') {
+    return jsonResponse({ data: { ok: true } })
+  }
+  if (url.includes('/rollback') && method === 'POST') {
+    const m = /versions\/(\d+)\/rollback/.exec(url)
+    return jsonResponse({ data: { version: Number(m?.[1] ?? 0) + 3 } })
+  }
   if (url.includes('/api/runs/run_wb_1') && !url.includes('/step')) {
     return jsonResponse({
       run: {
         id: 'run_wb_1',
-        status: 'running',
-        stage: 'planned',
+        status: awaitingGate ? 'awaiting_confirm' : 'running',
+        stage: awaitingGate ? 'gate' : 'planned',
         mode: 'create',
         errorMessage: null,
         tokenUsage: 120,
@@ -204,15 +213,15 @@ async function fakeFetch(input: unknown, init?: RequestInit): Promise<Response> 
     return jsonResponse({
       run: {
         id: 'run_wb_1',
-        status: done ? 'succeeded' : 'running',
-        stage: done ? 'finished' : 'paged',
+        status: awaitingGate ? 'awaiting_confirm' : done ? 'succeeded' : 'running',
+        stage: awaitingGate ? 'gate' : done ? 'finished' : 'paged',
         mode: 'create',
         errorCode: null,
         errorMessage: null,
         tokenUsage: 400,
         callCount: 3,
       },
-      done,
+      done: awaitingGate ? true : done,
       payload: null,
     })
   }
@@ -283,7 +292,7 @@ function container(): HTMLElement {
   return dom.window.document.getElementById('root') as HTMLElement
 }
 
-async function mount(options: { spec?: boolean; steps?: boolean[] } = {}) {
+async function mount(options: { spec?: boolean; steps?: boolean[]; gate?: boolean } = {}) {
   resetStubs(options)
   calls.length = 0
   FakeEventSource.instances = []
@@ -300,14 +309,25 @@ async function mount(options: { spec?: boolean; steps?: boolean[] } = {}) {
 }
 
 /** 重置所有可变桩状态，避免测试互相污染 */
-function resetStubs(options: { spec?: boolean; steps?: boolean[] } = {}) {
+function resetStubs(options: { spec?: boolean; steps?: boolean[]; gate?: boolean } = {}) {
   specAvailable = options.spec ?? true
   stepResponses = options.steps ?? [true]
+  awaitingGate = options.gate ?? false
 }
 
 function findButton(text: string): HTMLButtonElement | null {
   const buttons = Array.from(container().querySelectorAll('button')) as HTMLButtonElement[]
   return buttons.find((b) => b.textContent?.includes(text)) ?? null
+}
+
+/**
+ * 精确匹配按钮文案。
+ * ⚠️ 必须用它来点页签：像「需求契约」这样的页签名，也是
+ * 「确认计划与需求契约，继续生成」的子串，用模糊匹配会误点到确认按钮。
+ */
+function findButtonExact(text: string): HTMLButtonElement | null {
+  const buttons = Array.from(container().querySelectorAll('button')) as HTMLButtonElement[]
+  return buttons.find((b) => (b.textContent ?? '').trim() === text) ?? null
 }
 
 /**
@@ -575,4 +595,111 @@ test('工作台：点击「与当前对比」会拉取并展示结构差异（�
   assert.ok(text.includes('新增 1 项 · 修改 1 项'), '应显示变更摘要')
   assert.ok(text.includes('负责人'), '应列出新增的字段')
   assert.ok(text.includes('主题 › primary'), '应列出被修改的主题项')
+})
+
+test('工作台：等待确认时可修订契约并重新锁定（生成前的需求锁可干预）', async () => {
+  await mount({ gate: true })
+  await typeRequirement('做一个待办清单：能新增任务')
+  await React.act(async () => {
+    findGenerateButton()?.click()
+    await flush(24)
+  })
+
+  await React.act(async () => {
+    findButtonExact('需求契约')?.click()
+    await flush(4)
+  })
+  assert.ok(
+    container().textContent?.includes('生成尚未开始，你可以先修订契约再继续'),
+    'Gate 阶段应提示可以先行修订契约（可干预窗口）',
+  )
+
+  await React.act(async () => {
+    findButton('编辑契约')?.click()
+    await flush(4)
+  })
+  assert.ok(findButton('保存并重新锁定'), '应打开契约编辑器')
+
+  // ① 改验收点；② 关掉一条禁做项（说明"不想要的约束可以去掉"）
+  const acceptance = Array.from(container().querySelectorAll('textarea')).find((t) =>
+    (t as HTMLTextAreaElement).value.includes('能新增一条任务'),
+  ) as HTMLTextAreaElement | undefined
+  assert.ok(acceptance, '编辑器应带出原有验收点')
+  await React.act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    setter?.call(acceptance, '能新增一条任务\n能按状态筛选')
+    acceptance?.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  })
+
+  // 只取契约编辑器里的勾选框（左栏还有「跳过人工确认」的开关，不能用全局顺序）
+  const boxes = Array.from(
+    container().querySelectorAll('li input[type="checkbox"]'),
+  ) as HTMLInputElement[]
+  assert.equal(boxes.length, 2, '必做项与禁做项各有一个可勾选项')
+  await React.act(async () => {
+    boxes[1]?.click() // 取消「禁做项」
+    await flush(4)
+  })
+
+  await React.act(async () => {
+    findButton('保存并重新锁定')?.click()
+    await flush(16)
+  })
+
+  const posted = callsTo('/contract').find((c) => c.method === 'POST')
+  assert.ok(posted, '应提交契约修订')
+  const payload = posted?.body as {
+    mustDo: Array<{ enabled: boolean }>
+    mustNot: Array<{ enabled: boolean }>
+    acceptance: string[]
+  }
+  assert.equal(payload.mustDo[0]?.enabled, true, '必做项应保持启用')
+  assert.equal(payload.mustNot[0]?.enabled, false, '被取消勾选的禁做项应传成 enabled=false')
+  assert.deepEqual(payload.acceptance, ['能新增一条任务', '能按状态筛选'], '验收点应逐行提交')
+  assert.ok(
+    container().textContent?.includes('契约已更新并重新锁定'),
+    '保存后应明确告知"重新锁定"已生效（校验将按新契约执行）',
+  )
+  assert.equal(findButton('保存并重新锁定'), null, '保存成功后编辑器应关闭')
+})
+
+test('工作台：回滚必须二次确认，未确认前不得触碰历史版本', async () => {
+  await mount()
+  await React.act(async () => {
+    findButton('版本与迭代')?.click()
+    await flush(4)
+  })
+
+  await React.act(async () => {
+    findButton('回滚到此版本')?.click()
+    await flush(6)
+  })
+
+  assert.equal(callsTo('/rollback').length, 0, '只是点了入口，不应立刻发起回滚')
+  const text = container().textContent ?? ''
+  assert.ok(text.includes('确认回滚到'), '应弹出确认条，说明回滚以新版本追加')
+  assert.ok(text.includes('历史版本不会被删除'), '确认条应讲清回滚的语义')
+
+  // 取消 → 什么也不发生
+  await React.act(async () => {
+    findButton('取消')?.click()
+    await flush(4)
+  })
+  assert.equal(callsTo('/rollback').length, 0, '取消后仍不应发起回滚')
+  assert.equal(container().textContent?.includes('确认回滚到'), false, '取消后确认条应消失')
+
+  // 再来一次并确认
+  await React.act(async () => {
+    findButton('回滚到此版本')?.click()
+    await flush(6)
+  })
+  await React.act(async () => {
+    findButton('确认回滚')?.click()
+    await flush(16)
+  })
+
+  const rollback = callsTo('/rollback').find((c) => c.method === 'POST')
+  assert.ok(rollback, '确认后应发起回滚')
+  assert.ok(rollback?.url.includes('/versions/1/rollback'), `应回滚到被点的那一版，实际：${rollback?.url}`)
+  assert.ok(container().textContent?.includes('已回滚到 v1'), '应给出回滚结果反馈')
 })

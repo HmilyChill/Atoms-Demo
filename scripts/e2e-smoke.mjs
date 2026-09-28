@@ -155,11 +155,86 @@ const main = async () => {
       Array.isArray(contractArtifact?.payload?.acceptance),
   )
 
+  // ── 契约编辑与重锁定（M3 F-M3-3 / TST-M3-3）──
+  const originalMustDo = contractArtifact?.payload?.mustDo ?? []
+  const editedContract = await api(`/api/runs/${runId}/contract`, {
+    method: 'POST',
+    body: JSON.stringify({
+      // 改第一条的文字；关掉最后一条（验证"关掉的约束不再参与校验"）
+      mustDo: originalMustDo.map((m, i) => ({
+        id: m.id,
+        text: i === 0 ? `【用户修订】${m.text}` : m.text,
+        enabled: i !== originalMustDo.length - 1,
+      })),
+      mustNot: (contractArtifact?.payload?.mustNot ?? []).map((m) => ({ id: m.id, text: m.text, enabled: true })),
+      acceptance: ['能新增一条任务，并立即出现在列表中', '用户追加的验收点：刷新后数据仍在'],
+    }),
+  })
+  check(
+    '可修改需求契约并重新锁定',
+    editedContract.status === 200 && editedContract.body?.data?.revised === true,
+    `status=${editedContract.status} ${JSON.stringify(editedContract.body?.error ?? {})}`,
+  )
+  const editedMustDo = editedContract.body?.data?.contract?.mustDo ?? []
+  const editedMustNot = editedContract.body?.data?.contract?.mustNot ?? []
+  check('修订生效：被关闭的约束已移除', editedMustDo.length === originalMustDo.length - 1, `${editedMustDo.length} vs ${originalMustDo.length - 1}`)
+  check('改文字不会丢掉机检断言（避免校验失真）', editedMustDo.every((m) => typeof m.check?.kind === 'string'))
+  check('修订后的第一条文字已更新', String(editedMustDo[0]?.text ?? '').startsWith('【用户修订】'))
+  check('验收点可编辑', (editedContract.body?.data?.contract?.acceptance ?? []).length === 2)
+
+  const afterEdit = await api(`/api/runs/${runId}`)
+  const contractArtifacts = (afterEdit.body?.data?.artifacts ?? []).filter((a) => a.type === 'contract')
+  check('契约修订作为新的契约产物落库（实现"重新锁定"）', contractArtifacts.length >= 2, `契约产物数=${contractArtifacts.length}`)
+
+  // ── 契约编辑的安全边界（"不许把没实现的要求伪装成已通过机检"）──
+  const addFake = await api(`/api/runs/${runId}/contract`, {
+    method: 'POST',
+    body: JSON.stringify({
+      mustDo: [...editedMustDo.map((m) => ({ id: m.id, text: m.text, enabled: true })), { text: '凭空新增的必做项' }],
+    }),
+  })
+  check(
+    '不允许凭空新增必做项（新增要求只能写进验收点）',
+    addFake.status === 400,
+    `status=${addFake.status} ${JSON.stringify(addFake.body?.error?.message ?? '')}`,
+  )
+
+  const wipeAll = await api(`/api/runs/${runId}/contract`, {
+    method: 'POST',
+    body: JSON.stringify({ mustDo: editedMustDo.map((m) => ({ id: m.id, text: m.text, enabled: false })) }),
+  })
+  check('不允许把必做项全部删光（否则校验失去依据）', wipeAll.status === 400, `status=${wipeAll.status}`)
+
+  const emptyAcceptance = await api(`/api/runs/${runId}/contract`, {
+    method: 'POST',
+    body: JSON.stringify({ acceptance: [] }),
+  })
+  check('不允许把验收点清空', emptyAcceptance.status === 400, `status=${emptyAcceptance.status}`)
+
+  // 上面三次失败请求都不应写入新契约（失败的修改必须是"无声的"，不能污染产物）
+  const afterFailedEdits = await api(`/api/runs/${runId}`)
+  const contractsAfterFailures = (afterFailedEdits.body?.data?.artifacts ?? []).filter((a) => a.type === 'contract')
+  check(
+    '被拒绝的契约修改不会落库（失败不产生副作用）',
+    contractsAfterFailures.length === contractArtifacts.length,
+    `${contractsAfterFailures.length} vs ${contractArtifacts.length}`,
+  )
+
   const confirmed = await api(`/api/runs/${runId}/confirm`, { method: 'POST' })
   check('确认后进入 confirmed 状态', confirmed.body?.data?.run?.stage === 'confirmed')
 
   const driven = await driveRun(runId)
   check('生成流程可完整跑完', driven.ok, driven.error ?? '')
+
+  const editAfterStart = await api(`/api/runs/${runId}/contract`, {
+    method: 'POST',
+    body: JSON.stringify({ acceptance: ['试图在生成开始后改契约'] }),
+  })
+  check(
+    '生成开始后不允许再改契约（返回 409 并说明原因）',
+    editAfterStart.status === 409,
+    `status=${editAfterStart.status}`,
+  )
 
   const snap = await api(`/api/runs/${runId}`)
   const artifacts = snap.body?.data?.artifacts ?? []
@@ -173,6 +248,11 @@ const main = async () => {
 
   const verification = artifacts.filter((a) => a.type === 'verification').pop()?.payload
   check('校验报告整体通过（契约逐条机检）', verification?.ok === true, verification?.summary ?? '')
+  check(
+    `校验按【修订后】的契约执行（应有 ${editedMustDo.length} 必做 + ${editedMustNot.length} 禁做）`,
+    verification?.contract?.total === editedMustDo.length + editedMustNot.length,
+    `实际 total=${verification?.contract?.total}`,
+  )
 
   // 事件配对检查（禁止幽灵进度）
   const events = snap.body?.data?.events ?? []

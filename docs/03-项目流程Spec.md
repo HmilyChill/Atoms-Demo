@@ -94,39 +94,54 @@
 ## 5. API 契约
 
 > 统一约定：JSON 交互；鉴权用 HttpOnly Cookie；所有响应含 `traceId`。
+>
+> **下表已与实现逐条对齐**（业务路由 29 条 = 下表全部行；`pnpm build` 的清单共 31 条，
+> 另 2 条是 Next 内部页 `_not-found` / `_global-error`）。
+> 早期版本的本表曾列出一条 **从未实现** 的 `POST /api/runs/:id/repair`（已删除）；
+> 修复动作实际由编排器在 `step` 内部按上限自动执行，不需要单独接口。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | POST | `/api/auth/register` | 注册 |
 | POST | `/api/auth/login` | 登录 |
 | POST | `/api/auth/logout` | 退出 |
-| GET | `/api/auth/me` | 当前用户 |
+| GET | `/api/auth/me` | 当前用户（**一键体验**的演示账号也走这里） |
+| POST | `/api/auth/demo` | **一键体验**：创建演示账号并登录 |
+| GET | `/api/health` | 健康检查（含当前 provider 与是否降级为 Mock） |
 | GET / POST | `/api/projects` | 列出 / 新建项目 |
 | GET / PATCH / DELETE | `/api/projects/:id` | 项目详情 / 重命名 / 删除 |
 | GET / POST | `/api/projects/:id/sessions` | 会话列表 / 新建会话 |
 | POST | `/api/runs` | 启动一次生成，返回 `runId` |
-| GET | `/api/runs/:id` | Run 快照（用于事件丢失后对齐） |
-| GET | `/api/runs/:id/events` | **SSE 事件流**（支持 `Last-Event-ID` 续传） |
+| GET | `/api/runs/:id` | Run 快照 + 产物列表（**事件丢失后对齐，也是"产物归约"的数据源**） |
+| POST | `/api/runs/:id/step` | **推进一步**（短步骤执行，前端循环调用以规避函数超时） |
+| GET | `/api/runs/:id/events` | **SSE 事件流**（支持 `Last-Event-ID` 续传，可回放） |
 | POST | `/api/runs/:id/confirm` | 确认计划/契约，继续执行 |
+| **POST** | **`/api/runs/:id/contract`** | **在 Gate（`awaiting_confirm`）阶段修订契约并重新锁定**；非 Gate → 409；不许凭空新增机检项 / 删光必做项 / 清空验收点 → 400 |
 | POST | `/api/runs/:id/cancel` | 中断 |
-| POST | `/api/runs/:id/repair` | 触发修复（受次数上限约束） |
-| GET | `/api/projects/:id/spec` | 读取当前或指定版本 Spec |
-| POST | `/api/projects/:id/versions/:v/rollback` | 回滚到指定版本 |
-| GET | `/api/projects/:id/export` | 导出可运行源码包 |
-| GET / POST | `/api/projects/:id/records/:collection` | 生成应用的数据读写 |
+| GET | `/api/projects/:id/spec` | 读取当前或指定版本 Spec（含 `schemaVersion` 兼容检查） |
+| GET | `/api/projects/:id/diff` | **版本结构差异**（`?from=&to=`；"只改目标片段"的可见证据） |
+| POST | `/api/projects/:id/versions/:v/rollback` | 回滚到指定版本（**以新版本追加，历史不删除**） |
+| GET | `/api/projects/:id/preview-token` | 申请短期**预览令牌**（沙箱 iframe 无同源 → 不能靠 Cookie） |
+| POST | `/api/projects/:id/share` | 生成 / 读取**只读分享**链接 |
+| GET | `/api/projects/:id/export` | 导出（默认 / `?format=html` → **单文件 HTML**；`?format=zip` → **多文件工程 ZIP**） |
+| GET / POST | `/api/projects/:id/records/:collection` | 生成应用的数据读写（列表 / 新增） |
+| PATCH / DELETE | `/api/projects/:id/records/:collection/:recordId` | 生成应用的数据更新 / 删除 |
 
 **错误码约定**
 
 | 码 | 含义 | 前端行为 |
 |---|---|---|
-| 400 | 参数错误 | 就地提示 |
+| 400 | 参数错误（含**被拒绝的契约修订**） | 就地提示 |
 | 401 | 未登录 | 跳登录 |
-| 403 | 越权访问他人资源 | 明确拒绝，不泄露资源是否存在 |
-| 404 | 不存在 | 友好空态 |
-| 409 | 状态冲突（如重复确认、Run 已结束） | 刷新状态 |
+| 404 | 不存在 **或越权访问他人资源** | 友好空态（**越权也用 404，不泄露资源是否存在**，见下方说明） |
+| 409 | 状态冲突（如 Gate 之后改契约、Run 已结束） | 刷新状态 |
 | 422 | 校验失败（如 Spec 不合法） | 展示可读原因 |
 | 429 | 触发限流/配额 | 提示"演示额度已用完，可切换演示模式" |
 | 500 / 503 | 内部错误 / Provider 不可用 | 提示 + 提供降级路径 |
+
+> ⚠️ **本表曾写"403 越权"**，但实现选择的是 **404**：`requireProjectForOwner()` 在项目不属于当前用户时抛 `NOT_FOUND`。
+> 403 会泄露"该 id 确实存在、只是你没权限"，404 则让"不存在"和"不是你的"无法区分——这是**有意为之**，
+> 并有回归测试锁死（`tests/isolation.test.ts`）。文档此处已按实现更正。
 
 ---
 
@@ -136,7 +151,7 @@
 |---|---|---|
 | `run.started` | Run 创建 | `runId`, `sessionId` |
 | `plan.ready` | 计划产出 | `artifactId`, `summary` |
-| `contract.ready` | 需求契约产出 | `mustDo[]`, `mustNot[]`, `acceptance[]` |
+| `contract.ready` | 需求契约产出（**用户改过契约时 `revised: true` 再发一次**） | `mustDo[]`, `mustNot[]`, `acceptance[]`, `revised?` |
 | `agent.started` | 某角色开始 | `agent`, `stage` |
 | `agent.delta` | 流式输出片段 | `agent`, `chunk` |
 | `agent.finished` | 某角色结束 | `agent`, `durationMs`, `tokenUsage` |

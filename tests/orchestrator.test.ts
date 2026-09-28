@@ -223,3 +223,69 @@ test('版本链：parentVersion 正确串联，可逐级回溯（TST-M7-3）', a
   assert.equal((await store.listSpecVersions(project.id)).length, 4, '历史版本不应被删除')
   assert.ok(await store.getSpecVersion(project.id, 1), '原 v1 仍可读取')
 })
+
+// ─────────── 事件流：断线续传与回放 ───────────
+
+async function seedRunWithSteps(label: string, steps: number) {
+  const { store, project, session } = await seed(label)
+  const run = await createRun({
+    projectId: project.id,
+    sessionId: session.id,
+    userInput: TODO,
+    mode: 'create',
+    requireConfirm: false,
+  })
+  for (let i = 0; i < steps; i += 1) await advanceRun(run.id)
+  return { store, run }
+}
+
+test('事件流：按 Last-Event-ID 增量拉取，可安全重连且不重复消费（TST-M4-5）', async () => {
+  const { store, run } = await seedRunWithSteps('resume', 3)
+
+  const all = await store.listEvents(run.id)
+  assert.ok(all.length >= 5, `应已产生多条事件，实际 ${all.length}`)
+
+  // 模拟"客户端只收到前 2 条就断线了"
+  const cursor = all[1].event_id
+  const resumed = await store.listEventsSince(run.id, cursor)
+
+  assert.equal(resumed.length, all.length - 2, '应只返回游标之后的事件（不重不漏）')
+  assert.ok(
+    resumed.every((e) => e.event_id > cursor),
+    'eventId 必须严格大于游标',
+  )
+
+  // 重连幂等：同一个 after 重复拉取，结果一致（不会产生重复消费）
+  const again = await store.listEventsSince(run.id, cursor)
+  assert.deepEqual(
+    again.map((e) => e.event_id),
+    resumed.map((e) => e.event_id),
+    '同一游标重复拉取应得到相同结果',
+  )
+})
+
+test('事件回放：可还原每一步的产出类型与先后顺序（TST-M12-2）', async () => {
+  const { run } = await seedRunWithSteps('replay', 40)
+
+  const events = await allEvents(run.id)
+  const types = events.map((e) => e.type)
+
+  assert.equal(types[0], 'run.started', '首事件应为 run.started')
+  assert.equal(types[types.length - 1], 'run.finished', '末事件应为 run.finished')
+
+  for (const expected of ['plan.ready', 'contract.ready', 'spec.ready', 'verify.result', 'run.finished']) {
+    assert.ok(types.includes(expected as never), `回放应包含 ${expected}，实际：${JSON.stringify(types)}`)
+  }
+
+  // 顺序约束：计划 → 校验 → 规格落库 → 收敛
+  // 注意：spec.ready 携带的是"规格已作为版本落库"的信息，因此在校验之后发出；
+  // 真正的"产出规格"发生在 verify 之前（可通过 spec artifact 的存在证明）。
+  assert.ok(types.indexOf('plan.ready') < types.indexOf('verify.result'), '计划应早于校验')
+  assert.ok(types.indexOf('verify.result') < types.indexOf('spec.ready'), '规格落库应在校验之后')
+  assert.ok(types.indexOf('spec.ready') < types.indexOf('run.finished'), '落库应早于收敛')
+
+  // 每个 agent.started 都应有配对的 finished（回放时也成立）
+  const started = types.filter((t) => t === 'agent.started').length
+  const finished = types.filter((t) => t === 'agent.finished').length
+  assert.equal(started, finished, '回放中不应出现"只有开始没有结束"的智能体')
+})
