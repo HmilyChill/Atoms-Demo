@@ -16,6 +16,7 @@
     "smoke:provider": "node scripts/provider-smoke.mjs",
     "deploy:check": "node scripts/deploy-check.mjs",
     "push:github": "node scripts/push-to-github.mjs",
+    "deploy:vercel": "node scripts/deploy-vercel.mjs",
     "verify": "pnpm typecheck && pnpm test"
   },
   "dependencies": {

@@ -6,6 +6,9 @@
 
 本项目是 ROOT「AI Native 研发岗位」笔试挑战的交付物。设计文档见 `docs/`。
 
+- **源码仓库**：https://github.com/HmilyChill/atoms-demo （public，含完整提交历史与 3 个里程碑 tag）
+- **在线体验**：见 `docs/06-交付说明文档.md`（部署后回填）
+
 ---
 
 ## 1. 它解决什么问题（也是它与 Atoms/MGX 的差异）
@@ -190,6 +193,13 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
      GITHUB_TOKEN=ghp_xxx pnpm push:github
      ```
 2. Vercel → New Project → 选择该仓库 → 框架会自动识别 Next.js
+   - **或者一条命令自动部署**（走 Vercel REST API，不需要 CLI、不需要点控制台）：
+     ```bash
+     VERCEL_TOKEN=xxx pnpm deploy:vercel --check
+     ```
+     它会：建项目 → 写入环境变量（`AUTH_SECRET` 自动随机生成）→ 上传文件（**排除 `.env.local` 等本地密钥文件**）
+     → 等待构建完成 → 打印线上地址 → 跑一遍部署自检。
+     注意：脚本只会打印变量名，**绝不打印变量值**。
 3. 配置环境变量（**Preview 与 Production 都要配**）：
    - `AUTH_SECRET`（必填，任意长随机串；不配会退回开发默认值）
    - `DEEPSEEK_API_KEY`（可选；不配则自动运行在演示模式）

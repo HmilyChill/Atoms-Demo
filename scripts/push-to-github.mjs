@@ -177,6 +177,29 @@ async function main() {
     console.log(`  仓库已存在：${owner}/${REPO}（将强制更新 ${BRANCH} 分支）`)
   }
 
+  /**
+   * 空仓库引导。
+   *
+   * GitHub 的 Git Data API 在**完全空**的仓库上会拒绝建 blob：
+   *   POST /git/blobs -> 409 {"message":"Git Repository is empty."}
+   * 这是服务端限制（空仓库没有可挂靠的 ref），不是权限问题。
+   * 解法：先用 Contents API 落一个初始提交把仓库"激活"，再用 Git Data API 重建完整历史；
+   * 那个引导提交随后会被强推覆盖，不会出现在最终历史里。
+   */
+  const headRef = await api('GET', `/repos/${owner}/${REPO}/git/ref/heads/${BRANCH}`)
+  if (!headRef.ok) {
+    console.log('  仓库还是空的 → 先落一个引导提交（Git Data API 不允许在空仓库上建 blob）')
+    const boot = await api('PUT', `/repos/${owner}/${REPO}/contents/.atoms-bootstrap`, {
+      message: 'chore: 引导空仓库（随后由完整历史强推覆盖）',
+      content: Buffer.from('bootstrap\n').toString('base64'),
+      branch: BRANCH,
+    })
+    if (!boot.ok) {
+      throw new Error(`引导提交失败（HTTP ${boot.status}）：${boot.text.slice(0, 200)}`)
+    }
+    console.log('  ✓ 引导提交完成，继续重建完整历史')
+  }
+
   console.log('\n=== 上传 blob 并重建提交历史 ===')
   const blobCache = new Map() // 本地 blob sha -> 远程 blob sha
   const commitMap = new Map() // 本地 commit sha -> 远程 commit sha
