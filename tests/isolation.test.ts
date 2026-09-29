@@ -152,6 +152,32 @@ test('事件 eventId 在并发写入下仍单调递增且无重复', async () =>
   )
 })
 
+test('只读文件系统：本地库不可写时退回临时目录，并留下醒目告警（Vercel 场景）', async () => {
+  const { resetStore } = await import('@/lib/db/store')
+  const { recentLogs, clearLogs } = await import('@/lib/obs/logger')
+  const previous = process.env.ATOMS_DB_FILE
+  // 指向一个必然不可写的路径：模拟 Serverless 的只读文件系统
+  process.env.ATOMS_DB_FILE = process.platform === 'win32' ? 'C:\\Windows\\System32\\atoms-should-fail.db' : '/proc/atoms-should-fail.db'
+
+  try {
+    clearLogs()
+    resetStore()
+    const store = getStore()
+    // 能正常读写 = 已经退回到可写目录，而不是直接 500
+    const u = await store.createUser({ email: `fallback-${stamp}@t.local`, passwordHash: 'h', displayName: 'F' })
+    assert.ok((await store.findUserById(u.id))?.id, '退回临时目录后仍应能正常读写')
+
+    const logs = recentLogs()
+    const warn = logs.find((l) => String((l as { event?: string }).event) === 'storage.fallback')
+    assert.ok(warn, `应留下 storage.fallback 告警，实际日志：${JSON.stringify(logs.map((l) => (l as { event?: string }).event))}`)
+    assert.match(JSON.stringify(warn), /临时目录/, '告警应说明退回了哪里')
+  } finally {
+    resetStore()
+    if (previous === undefined) delete process.env.ATOMS_DB_FILE
+    else process.env.ATOMS_DB_FILE = previous
+  }
+})
+
 test('回滚语义：以新版本追加、历史版本保留、生成物数据不丢（TST-M7-2 的存储层证据）', async () => {
   const store = getStore()
   const u = await store.createUser({ email: `m-${stamp}@t.local`, passwordHash: 'h', displayName: 'M' })

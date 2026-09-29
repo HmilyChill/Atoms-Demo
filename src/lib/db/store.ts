@@ -1,8 +1,9 @@
-import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { env } from '@/lib/env'
 import { AppError } from '@/lib/errors'
+import { logger } from '@/lib/obs/logger'
 import { DDL, SCHEMA_VERSION } from './schema'
 import { newId, nowIso } from '@/lib/ids'
 import { NodeSqliteExecutor, TursoExecutor, type SqlExecutor } from './executor'
@@ -781,14 +782,80 @@ class SqlStore implements StoreProvider {
 // 执行器选择：有托管库 URL 就用 Turso，否则用本地 SQLite 文件
 // ─────────────────────────────────────────────────────────────
 
+interface LocalDatabase {
+  exec(sql: string): void
+  prepare(sql: string): unknown
+  close(): void
+}
+
+/**
+ * 懒加载 `node:sqlite`。
+ *
+ * 为什么不用顶层 `import`：那是**导入期**求值 —— 一旦运行时没有这个内置模块，
+ * **整个应用连启动都做不到**，哪怕你只配了 Turso、根本不需要本地 SQLite。
+ *
+ * 为什么用 `process.getBuiltinModule`（Node 22.3+）：
+ * 试过 `createRequire(import.meta.url)('node:sqlite')`，**在 Next 的服务端产物里会失败**
+ * （bundle 上下文里 `import.meta.url` 不可靠）—— 单元测试却发现不了，是端到端冒烟抓出来的。
+ * `getBuiltinModule` 不做静态分析、也不依赖模块解析，正是为这种场景提供的。
+ */
+function loadNodeSqlite(): new (path: string) => LocalDatabase {
+  const getBuiltin = (process as unknown as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule
+  const mod = typeof getBuiltin === 'function' ? (getBuiltin('node:sqlite') as { DatabaseSync?: unknown } | undefined) : undefined
+  if (!mod || typeof mod.DatabaseSync !== 'function') {
+    throw new AppError(
+      'INTERNAL',
+      '当前 Node 运行时不支持内置 SQLite（需要 Node 22.5+，推荐 24）',
+      '请配置 TURSO_DATABASE_URL 使用托管数据库，或把 Node 升级到 24',
+    )
+  }
+  return mod.DatabaseSync as new (path: string) => LocalDatabase
+}
+
+/**
+ * 打开本地 SQLite：优先项目内的 `.data/`，**不可写时退回系统临时目录**。
+ *
+ * 为什么需要退回：Vercel 这类 Serverless 的文件系统是**只读**的，
+ * `new DatabaseSync('.data/atoms.db')` 会直接抛错 → 整个站点 500。
+ * 退回 `/tmp` 至少能跑起来（同一实例内数据仍在），但**不持久**，
+ * 因此这里必须留下醒目告警，引导配置托管库（docs/06 §3.2）。
+ */
+function openLocalDatabase(): LocalDatabase {
+  const DatabaseSync = loadNodeSqlite()
+  const candidates = [env.dbFile, join(tmpdir(), 'atoms.db')]
+  let lastError: unknown = null
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const file = candidates[i]
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      const db = new DatabaseSync(file)
+      if (i > 0) {
+        logger.warn({
+          event: 'storage.fallback',
+          message: `数据目录不可写（${env.dbFile}），已退回临时目录 ${file}`,
+          impact: '数据在实例回收后会丢失；线上持久化请配置 TURSO_DATABASE_URL',
+        })
+      }
+      return db
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  throw new AppError(
+    'INTERNAL',
+    `无法打开本地数据库：${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    '请配置 TURSO_DATABASE_URL 使用托管数据库（Serverless 的文件系统通常是只读的）',
+  )
+}
+
 export function createExecutor(): SqlExecutor {
   const url = env.databaseUrl
   if (url !== '') {
     return new TursoExecutor({ url, token: env.databaseToken, timeoutMs: env.databaseTimeoutMs })
   }
-  mkdirSync(dirname(env.dbFile), { recursive: true })
-  const db = new DatabaseSync(env.dbFile) as unknown as ConstructorParameters<typeof NodeSqliteExecutor>[0]
-  return new NodeSqliteExecutor(db)
+  return new NodeSqliteExecutor(openLocalDatabase() as never)
 }
 
 // HMR 下复用同一连接（Next dev 会重复求值模块）

@@ -211,6 +211,12 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
 >
 > **另一条路径**：若不想引入托管库，也可部署到带持久卷的容器平台（Railway / Fly / VPS / Oracle Always Free），
 > 那样**零配置**即可继续用 SQLite 文件。
+>
+> ⚠️ **没配托管库就部署到 Serverless 会怎样**：本地库文件写不进去（只读文件系统），
+> 应用会**自动退回系统临时目录并打出 `storage.fallback` 告警** —— 站点能正常打开、能完整演示，
+> 但数据在同一实例被回收后会重置。所以"线上持久化"仍然要求配置 `TURSO_DATABASE_URL`。
+> 另外 `node:sqlite` 是**按需加载**的，因此只配了 Turso 的部署完全不依赖它；
+> `engines.node` 固定为 `24.x`，保证 Serverless 会选到支持内置 SQLite 的 Node 版本。
 
 ---
 
