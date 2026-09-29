@@ -7,7 +7,12 @@
 本项目是 ROOT「AI Native 研发岗位」笔试挑战的交付物。设计文档见 `docs/`。
 
 - **源码仓库**：https://github.com/HmilyChill/atoms-demo （public，含完整提交历史与 3 个里程碑 tag）
-- **在线体验**：见 `docs/06-交付说明文档.md`（部署后回填）
+- **在线体验**：https://atoms-demo-sandy-three.vercel.app （备用入口 https://atoms-demo-hmily1.vercel.app ）
+
+> ⚠️ **国内网络访问提示**：`*.vercel.app` 在中国大陆可能被 DNS 污染 / TCP 超时
+> （实测本机到该域名 `UND_ERR_CONNECT_TIMEOUT`）。若打不开，请按 §2 在本地运行
+> （`pnpm install && pnpm dev`，零配置即可完整演示），或为该项目绑定自有域名走 Vercel 边缘。
+> 线上未配置托管数据库时，数据存于实例临时目录，实例回收后会重置；本地运行则用文件持久化。
 
 ---
 
