@@ -127,7 +127,19 @@ const main = async () => {
   let project = (await api('GET', `/v9/projects/${PROJECT}`)).json
   if (!project?.id) {
     const created = await api('POST', '/v11/projects', { name: PROJECT, framework: 'nextjs' })
-    if (!created.json?.id) throw new Error(`创建项目失败：HTTP ${created.status} ${created.text.slice(0, 200)}`)
+    if (!created.json?.id) {
+      // 最常见的坑：把 AI Gateway 的 key 当成部署令牌用了。
+      // 两者前缀不同（AI Gateway 是 vck_），权限也完全不同：Gateway key 只能读账号 + 调模型。
+      if (created.status === 403) {
+        throw new Error(
+          '令牌没有"创建项目"的权限。\n' +
+            '   → 如果你用的是 vck_ 开头的 key，那是 **AI Gateway** 的 key（只能调模型），不能部署。\n' +
+            '   → 部署需要 Vercel **Access Token**：https://vercel.com/account/tokens → Create Token\n' +
+            '     Scope 选你的个人账号（不要选 AI Gateway），有效期建议 1 天即可。',
+        )
+      }
+      throw new Error(`创建项目失败：HTTP ${created.status} ${created.text.slice(0, 200)}`)
+    }
     project = created.json
     console.log('  已创建项目：' + PROJECT)
   } else {
