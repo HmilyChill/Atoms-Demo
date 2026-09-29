@@ -213,14 +213,18 @@ docs/                        问题解析、任务分解、流程 Spec、模块�
    - `DAILY_CALL_LIMIT`、`RUN_CALL_BUDGET`、`RATE_LIMIT_PER_MINUTE`（可选，配额保护）
 4. 部署后访问首页自检：`/api/auth/me` 应返回 `provider.demoMode` 状态
 
-> **✅ 线上持久化（已支持）**：Vercel 的文件系统是**只读**的，因此线上不能用本地 SQLite 文件。
-> 本项目已内置 **Turso（SQL over HTTP）执行器**——只要配置下面两个环境变量，
+> **✅ 线上持久化（本项目已接入）**：Vercel 的文件系统是**只读**的，因此线上不能用本地 SQLite 文件。
+> 本项目已内置 **Turso（SQL over HTTP）执行器**——配置下面两个环境变量后，
 > 存储层会**自动**从本地 SQLite 切换到远程库，**无需修改任何代码**：
 >
 > ```bash
 > TURSO_DATABASE_URL=https://<db>-<org>.turso.io   # 或 libsql:// / turso://（会自动转 https）
 > TURSO_AUTH_TOKEN=<token>
 > ```
+>
+> **当前线上实例已配置好**（东京节点），数据存在托管库中，实例回收不会丢。验证方式：
+> 用真实 Turso 跑完整端到端 **131/131** 通过（9 张表由应用自动建好），
+> `/api/health` 返回 `storage.kind: "turso"`、`storage.durable: true`。
 >
 > 存储层的实现方式：`SqlExecutor` 抽象出"如何连数据库"，`SqlStore` 只写一次 SQL；
 > 本地用 Node 内置 `node:sqlite`（零原生依赖），线上用 Turso 纯 `fetch`（零新依赖）。
