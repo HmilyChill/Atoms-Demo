@@ -89,7 +89,14 @@ function localTags() {
 
 // ─────────────────────────── GitHub API ───────────────────────────
 
-async function api(method, endpoint, body) {
+/**
+ * 带重试的请求。
+ *
+ * 为什么必须重试：本机网络的对外访问是**间歇性**的（实测同一域名连续 3 次
+ * `fetch failed`、第 4 次 200）。一次推送要发约 300 个请求，不重试几乎必然中断。
+ * 只重试网络层错误与 5xx/429，**不重试 4xx**（那是真错误，重试只会浪费时间）。
+ */
+async function apiOnce(method, endpoint, body) {
   const res = await fetch(`${API}${endpoint}`, {
     method,
     headers: {
@@ -109,6 +116,27 @@ async function api(method, endpoint, body) {
     json = null
   }
   return { ok: res.ok, status: res.status, json, text }
+}
+
+async function api(method, endpoint, body, attempts = 5) {
+  let lastError = null
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const res = await apiOnce(method, endpoint, body)
+      if (res.status === 429 || res.status >= 500) {
+        lastError = new Error(`HTTP ${res.status}`)
+        if (i < attempts) {
+          await new Promise((r) => setTimeout(r, 1000 * i))
+          continue
+        }
+      }
+      return res
+    } catch (err) {
+      lastError = err
+      if (i < attempts) await new Promise((r) => setTimeout(r, 1000 * i))
+    }
+  }
+  throw lastError ?? new Error('请求失败')
 }
 
 // ─────────────────────────── 主流程 ───────────────────────────

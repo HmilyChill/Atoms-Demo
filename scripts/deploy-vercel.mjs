@@ -81,7 +81,7 @@ function collectFiles(dir = ROOT, rel = '') {
   return out
 }
 
-async function api(method, endpoint, body) {
+async function apiOnce(method, endpoint, body) {
   const res = await fetch(API + endpoint, {
     method,
     headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
@@ -97,24 +97,66 @@ async function api(method, endpoint, body) {
   return { status: res.status, ok: res.ok, json, text }
 }
 
-/** 上传单个文件内容（按内容 sha1 去重，与 CLI 用的是同一套机制） */
+/**
+ * 带重试的请求：本机对外网络是**间歇性**的（实测同域名连续 3 次 fetch failed、
+ * 第 4 次 200）。只重试网络层错误与 5xx/429，不重试 4xx。
+ */
+async function api(method, endpoint, body, attempts = 5) {
+  let lastError = null
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const res = await apiOnce(method, endpoint, body)
+      if (res.status === 429 || res.status >= 500) {
+        lastError = new Error(`HTTP ${res.status}`)
+        if (i < attempts) {
+          await new Promise((r) => setTimeout(r, 1000 * i))
+          continue
+        }
+      }
+      return res
+    } catch (err) {
+      lastError = err
+      if (i < attempts) await new Promise((r) => setTimeout(r, 1000 * i))
+    }
+  }
+  throw lastError ?? new Error('请求失败')
+}
+
+/** 上传单个文件内容（按内容 sha1 去重，与 CLI 用的是同一套机制；同样带重试） */
 async function uploadFile(relPath) {
   const content = readFileSync(path.join(ROOT, relPath))
   const sha = createHash('sha1').update(content).digest('hex')
-  const res = await fetch(API + '/v2/files', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + TOKEN,
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': String(content.length),
-      'x-vercel-digest': sha,
-    },
-    body: new Uint8Array(content),
-  })
-  if (!res.ok && res.status !== 409) {
-    throw new Error(`上传文件失败（${relPath}）：HTTP ${res.status}`)
+  let lastError = null
+  for (let i = 1; i <= 5; i += 1) {
+    try {
+      const res = await fetch(API + '/v2/files', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + TOKEN,
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(content.length),
+          'x-vercel-digest': sha,
+        },
+        body: new Uint8Array(content),
+      })
+      if (!res.ok && res.status !== 409) {
+        if (res.status >= 500 || res.status === 429) {
+          lastError = new Error(`HTTP ${res.status}`)
+          if (i < 5) {
+            await new Promise((r) => setTimeout(r, 1000 * i))
+            continue
+          }
+        }
+        throw new Error(`上传文件失败（${relPath}）：HTTP ${res.status}`)
+      }
+      return { file: relPath, sha, size: content.length }
+    } catch (err) {
+      lastError = err
+      if (String(err?.message ?? '').includes('上传文件失败')) throw err
+      if (i < 5) await new Promise((r) => setTimeout(r, 1000 * i))
+    }
   }
-  return { file: relPath, sha, size: content.length }
+  throw lastError ?? new Error(`上传文件失败（${relPath}）`)
 }
 
 const main = async () => {
