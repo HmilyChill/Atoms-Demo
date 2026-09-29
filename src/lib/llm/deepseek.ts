@@ -15,8 +15,33 @@ const SCHEMA_HINTS: Record<LlmExpectation, string> = {
   contract: `输出 JSON：{"mustDo":[{"id":string,"text":string,"check":{"kind":"component","type":"form|table|list|detail|stats|chart|filter"}}],"mustNot":[{"id":string,"text":string,"check":{"kind":"maxModels","max":number}}],"acceptance":[string]}`,
   pages: `输出 JSON：{"pages":[{"id":string,"title":string,"layout":"single|two-column|dashboard","components":[string],"purpose":string}]}`,
   dataModel: `输出 JSON：{"models":[{"name":string,"label":string,"fields":[{"name":string,"label":string,"type":"string|text|number|boolean|date|select","required":boolean,"options":[string],"inList":boolean}]}]}`,
-  spec: `输出 JSON（App Spec）：{"meta":{"schemaVersion":1,"name":string,"description":string,"generatedAt":string},"theme":{"primary":string,"radius":"sm|md|lg","density":"compact|cozy|comfortable"},"dataModels":[{"name":string,"label":string,"fields":[...]}],"pages":[{"id":string,"title":string,"layout":"single|two-column|dashboard","components":[{"id":string,"type":"heading|text|callout|form|table|list|detail|stats|chart|filter|tabs",...}]}],"navigation":[{"label":string,"pageId":string}]}`,
-  patch: `输出 JSON：{"spec": AppSpec,"changeSummary":string,"applied":boolean}。只修改与诉求相关的片段，其余部分必须原样保留。`,
+  spec: `输出 JSON（App Spec）：{"meta":{"schemaVersion":1,"name":string,"description":string,"generatedAt":string},"theme":{"primary":string,"radius":"sm|md|lg","density":"compact|cozy|comfortable"},"dataModels":[{"name":string,"label":string,"fields":[{"name":string,"label":string,"type":"string|text|number|boolean|date|select","required":boolean,"options":[string],"inList":boolean}]}],"pages":[{"id":string,"title":string,"layout":"single|two-column|dashboard","components":[{"id":string,"type":"heading|text|callout|form|table|list|detail|stats|chart|filter|tabs"}]}],"navigation":[{"label":string,"pageId":string}]}
+
+【组件字段（必须严格使用这些字段名）】
+- form：model + fields（字段名数组）+ submitLabel + action
+- table：model + columns[{field,label}] + rowActions
+- list：model + itemTitle + itemSubtitle
+- detail：model + fields
+- stats：model + metric("count"|"sum"|"avg") + metricField（metric=sum/avg 时必填）
+- chart：model + chart("bar"|"line"|"pie") + xField + yField + aggregate("count"|"sum")
+- filter：model + filterField
+- tabs：tabs[{label,components:[组件]}]
+- heading/text/callout：text
+
+【动作 action：只允许这 4 种，多一个字段/少一个字段都会判定为不合法】
+- {"kind":"create","label":string,"model":string}
+- {"kind":"delete","label":string,"model":string}
+- {"kind":"status","label":string,"model":string,"field":string,"value":string}
+- {"kind":"toggle","label":string,"model":string,"field":string}
+严禁输出 "update"、"navigate" 或其它未列出的 kind。
+页面跳转**不要**用动作表达：只写进顶层 navigation 数组。
+
+【引用必须真实存在，否则整次生成会失败】
+- 每个 model 必须等于 dataModels 里某个 name；
+- 每个 field / filterField / xField / yField / metricField / columns[].field / form.fields[] 必须存在于对应 model 的 fields 里；
+- 每个 pageId（navigation 与 tabs 之外）必须等于 pages 里某个 id。
+宁可少写一个组件，也不要引用不存在的名字。`,
+  patch: `输出 JSON：{"spec": AppSpec,"changeSummary":string,"applied":boolean}。只修改与诉求相关的片段，其余部分必须原样保留。动作只允许 create/delete/status/toggle（status 与 toggle 必须带 field；navigate 只能通过 navigation 数组表达），且新增的 model/field/id 必须真实存在。`,
   text: `输出 JSON：{"text":string}`,
 }
 

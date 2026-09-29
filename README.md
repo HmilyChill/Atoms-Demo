@@ -63,7 +63,7 @@ pnpm dev          # 开发服务器
 pnpm build        # 生产构建
 pnpm start        # 启动生产服务
 pnpm typecheck    # TypeScript 类型检查（tsc --noEmit）
-pnpm test         # 单元测试 132 项（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时 / 导出包 / 工作台 UI / Turso 协议 / 安全与口令 / 编排与版本链）
+pnpm test         # 单元测试 133 项（管线 / 契约 / 校验自愈 / 归属隔离 / 渲染运行时 / 导出包 / 工作台 UI / Turso 协议 / 安全与口令 / 编排与版本链）
 pnpm smoke        # 端到端冒烟测试 129 项断言（需先启动服务，见下）
 pnpm smoke:provider   # 真实模型连通性与结构化输出验证（需 DEEPSEEK_API_KEY）
 pnpm push:github      # 用 GitHub API 推送仓库（保留完整提交历史与 tag；先跑 --dry-run）
@@ -85,6 +85,13 @@ BASE_URL=http://localhost:3000 node scripts/e2e-smoke.mjs
 
 > ⚠️ 脚本默认连 `http://127.0.0.1:3210`（`pnpm start` 的默认端口是 3000）。
 > **换端口时一定要显式传 `BASE_URL`**，否则会连不上直接失败。
+>
+> ⚠️ 如果你已经配了 `DEEPSEEK_API_KEY`，服务端会走**真实模型**，而上面这些断言建立在
+> "Mock 是确定性的"之上 —— 它们会**假失败**。要复现这份确定性回归，请显式固定 Mock：
+> ```bash
+> DEMO_MODE=true pnpm build && DEMO_MODE=true pnpm start
+> ```
+> 真实模型的端到端验证方式见 `docs/05-执行记录与跳过项.md` §1.1（含实测耗时与 token）。
 
 ---
 

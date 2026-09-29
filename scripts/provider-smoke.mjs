@@ -7,7 +7,15 @@
  *
  * 用法：
  *   DEEPSEEK_API_KEY=sk-xxx node scripts/provider-smoke.mjs
+ *
+ * 也支持直接从 `.env.local` 读取（Next.js 会自动读它，但这个脚本是纯 node，
+ * 不自动读 —— 不补这一步的话，用户填好 .env.local 再跑会误以为"Key 没配"）。
  */
+try {
+  process.loadEnvFile('.env.local')
+} catch {
+  /* 没有 .env.local 就按环境变量来 */
+}
 
 const key = process.env.DEEPSEEK_API_KEY ?? ''
 const baseUrl = process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'
