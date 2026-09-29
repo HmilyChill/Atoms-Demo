@@ -9,9 +9,11 @@
 - **源码仓库**：https://github.com/HmilyChill/atoms-demo （public，含完整提交历史与 3 个里程碑 tag）
 - **在线体验**：https://atoms-demo-sandy-three.vercel.app （备用入口 https://atoms-demo-hmily1.vercel.app ）
 
-> ⚠️ **国内网络访问提示**：`*.vercel.app` 在中国大陆可能被 DNS 污染 / TCP 超时
-> （实测本机到该域名 `UND_ERR_CONNECT_TIMEOUT`）。若打不开，请按 §2 在本地运行
-> （`pnpm install && pnpm dev`，零配置即可完整演示），或为该项目绑定自有域名走 Vercel 边缘。
+> ⚠️ **若在线链接打不开**：交付环境本机到 `*.vercel.app` 出现 TCP 超时
+> （`UND_ERR_CONNECT_TIMEOUT`），因此**线上未能跑自检**（同一套代码本地为 29/29）。
+> 该环境的出网是**选择性放行**的（baidu 通、GitHub/Vercel API 时通时断），所以这个超时
+> **可能是环境产物、未必代表真实网络**。若你那边也打不开，请按 §2 在本地运行
+> （`pnpm install && pnpm dev`，零配置即可完整演示），或为项目绑定自有域名。
 > 线上未配置托管数据库时，数据存于实例临时目录，实例回收后会重置；本地运行则用文件持久化。
 
 ---
