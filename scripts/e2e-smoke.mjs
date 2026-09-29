@@ -110,6 +110,17 @@ const main = async () => {
     health.body?.data?.provider?.kind === 'mock' && health.body?.data?.provider?.degraded === false,
     JSON.stringify(health.body?.data?.provider),
   )
+  // 存储模式必须能被一眼看到：Serverless 未配托管库时会退回临时目录（不怕暴露，怕的是没人知道）
+  check(
+    '健康检查如实报告存储是否持久（M9）',
+    typeof health.body?.data?.storage?.kind === 'string' && typeof health.body?.data?.storage?.durable === 'boolean',
+    JSON.stringify(health.body?.data?.storage),
+  )
+  check(
+    '本地/容器环境应报告为持久（sqlite 或 turso）',
+    health.body?.data?.storage?.durable === true,
+    `本地跑时不应退化为临时存储，实际：${JSON.stringify(health.body?.data?.storage)}`,
+  )
 
   const demo = await api('/api/auth/demo', { method: 'POST' })
   check('一键体验可创建演示账号', demo.status === 200 && !!demo.body?.data?.id, `status=${demo.status}`)

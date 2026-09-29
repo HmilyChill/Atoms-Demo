@@ -1,5 +1,6 @@
 import { ok, route } from '@/lib/api/http'
 import { getProviderInfo } from '@/lib/llm'
+import { storageInfo } from '@/lib/db/store'
 import { quotaSnapshot } from '@/lib/quota/guard'
 
 /**
@@ -26,6 +27,8 @@ export async function GET(): Promise<Response> {
         note: provider.note,
       },
       quota: quotaSnapshot(),
+      // 如实报告存储是否持久（Serverless 未配托管库时会退回临时目录）
+      storage: storageInfo(),
       runtime: {
         node: process.version,
         env: process.env.NODE_ENV ?? 'unknown',

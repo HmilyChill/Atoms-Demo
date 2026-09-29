@@ -820,6 +820,9 @@ function loadNodeSqlite(): new (path: string) => LocalDatabase {
  * 退回 `/tmp` 至少能跑起来（同一实例内数据仍在），但**不持久**，
  * 因此这里必须留下醒目告警，引导配置托管库（docs/06 §3.2）。
  */
+/** 本地库是否因为目录不可写而退回了临时目录（用于对外如实暴露"当前存储是否持久"） */
+let localStorageFallback = false
+
 function openLocalDatabase(): LocalDatabase {
   const DatabaseSync = loadNodeSqlite()
   const candidates = [env.dbFile, join(tmpdir(), 'atoms.db')]
@@ -831,6 +834,7 @@ function openLocalDatabase(): LocalDatabase {
       mkdirSync(dirname(file), { recursive: true })
       const db = new DatabaseSync(file)
       if (i > 0) {
+        localStorageFallback = true
         logger.warn({
           event: 'storage.fallback',
           message: `数据目录不可写（${env.dbFile}），已退回临时目录 ${file}`,
@@ -848,6 +852,33 @@ function openLocalDatabase(): LocalDatabase {
     `无法打开本地数据库：${lastError instanceof Error ? lastError.message : String(lastError)}`,
     '请配置 TURSO_DATABASE_URL 使用托管数据库（Serverless 的文件系统通常是只读的）',
   )
+}
+
+export interface StorageInfo {
+  /** `turso` = 托管库（跨实例持久）｜`sqlite` = 本地文件｜`sqlite-temp` = 退回临时目录（不持久） */
+  kind: 'turso' | 'sqlite' | 'sqlite-temp'
+  /** 数据是否能跨实例/重启保留 */
+  durable: boolean
+  note: string
+}
+
+/**
+ * 对外如实报告存储模式（M9）。
+ * 为什么需要：Serverless 上没配托管库时会退回临时目录 —— 这件事必须能被一眼看到，
+ * 而不是等评审发现"数据怎么没了"。
+ */
+export function storageInfo(): StorageInfo {
+  if (env.databaseUrl !== '') {
+    return { kind: 'turso', durable: true, note: '已配置托管数据库（Turso / libSQL over HTTP）' }
+  }
+  if (localStorageFallback) {
+    return {
+      kind: 'sqlite-temp',
+      durable: false,
+      note: '文件系统不可写，已退回临时目录：数据在实例回收后会重置。配置 TURSO_DATABASE_URL 可持久化',
+    }
+  }
+  return { kind: 'sqlite', durable: true, note: '本地 SQLite 文件（适合本机与带持久卷的容器）' }
 }
 
 export function createExecutor(): SqlExecutor {
